@@ -53,18 +53,25 @@ public sealed class LocalScan
         IReadOnlyList<ScanSkip> skipped,
         IReadOnlyList<ScanIssue> issues,
         IReadOnlyList<CaseCollision> collisions,
-        int ignoredCount,
+        IReadOnlyList<string> ignored,
         DateTimeOffset scannedAt,
-        TimeSpan duration)
+        TimeSpan duration,
+        IgnoreRules? rules = null)
     {
         Root = root;
         Entries = entries;
         Skipped = skipped;
         Issues = issues;
         Collisions = collisions;
-        IgnoredCount = ignoredCount;
+        Ignored = ignored;
+        Rules = rules;
         ScannedAt = scannedAt;
         Duration = duration;
+
+        var ignoredByKey = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var path in ignored)
+            ignoredByKey[PathKey.Fold(path)] = path;
+        IgnoredByKey = ignoredByKey;
 
         var byKey = new Dictionary<string, LocalEntry>(StringComparer.Ordinal);
         foreach (var entry in entries)
@@ -95,7 +102,16 @@ public sealed class LocalScan
     /// <summary>Lookup for paths deliberately absent from <see cref="ByKey"/>.</summary>
     public IReadOnlyDictionary<string, ScanSkip> SkippedByKey { get; }
 
-    public int IgnoredCount { get; }
+    /// <summary>Topmost paths pruned by .pdignore/inline excludes.</summary>
+    public IReadOnlyList<string> Ignored { get; }
+
+    /// <summary>Folded lookup for paths pruned by ignore rules.</summary>
+    public IReadOnlyDictionary<string, string> IgnoredByKey { get; }
+
+    /// <summary>The rules used for this scan, if the scanner loaded them.</summary>
+    public IgnoreRules? Rules { get; }
+
+    public int IgnoredCount => Ignored.Count;
 
     public DateTimeOffset ScannedAt { get; }
 
@@ -171,7 +187,7 @@ public static class LocalScanner
         var skipped = new List<ScanSkip>();
         var issues = new List<ScanIssue>();
         var collisions = new List<CaseCollision>();
-        var ignoredCount = 0;
+        var ignored = new List<string>();
 
         var stack = new Stack<PendingDirectory>();
         stack.Push(new PendingDirectory(rootInfo, string.Empty));
@@ -218,7 +234,7 @@ public static class LocalScanner
 
                 if (ignore.IsIgnoredNormalized(relativePath, isDirectory))
                 {
-                    ignoredCount++;
+                    ignored.Add(relativePath);
                     continue;
                 }
 
@@ -291,9 +307,10 @@ public static class LocalScanner
             skipped,
             issues,
             collisions,
-            ignoredCount,
+            ignored,
             DateTimeOffset.UtcNow,
-            started.Elapsed);
+            started.Elapsed,
+            ignore);
     }
 
     private static void ScanFile(

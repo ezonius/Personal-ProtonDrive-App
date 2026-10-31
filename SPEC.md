@@ -295,7 +295,9 @@ file/dir is a conflict, never a silent replace.
 - `IgnoreRules` is loaded once per scan from the sync's one ignore file, with
   inline `exclude` patterns appended afterwards. Matching is case-sensitive by
   default; parent-directory exclusion wins over a child negation, exactly as in
-  git. `Explain` reports the deciding rule and line.
+  git. `Explain` reports the deciding rule and line. The same rules are applied
+  to remote-only paths by the planner, so an ignored path is neither downloaded
+  nor used to infer a deletion.
 
 ---
 
@@ -308,7 +310,12 @@ plan(base, local, remote, config) -> { actions[], conflicts[], skipped[], stats 
 ```
 
 It performs no I/O, which makes the entire decision matrix unit-testable and
-guarantees `plan` and `run` cannot disagree.
+guarantees `plan` and `run` cannot disagree. Implementation:
+`src/PdSync/Plan/Planner.cs`. The remote snapshot is built from
+`ProtonCli` + `RemoteIndex` (`src/PdSync/Proton`, `src/PdSync/Remote`) and uses
+paths relative to the sync root; the absolute remote root is kept only for CLI
+calls. File renames are detected per §5.4; directory renames remain normal
+subtree operations.
 
 ### 5.1 Decision table
 
@@ -828,10 +835,10 @@ call costs ~2–4 s.
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 | Spikes S1–S14 | **Done 2026-10-31**: `docs/spikes.md`; S8 deferred, no blocking unknowns |
-| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, `doctor`, `plan` with empty remote; FakeProtonCli harness **(done)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
+| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, pure planner + remote index **(done)**, FakeProtonCli planner tests **(done)**, `doctor`, `plan` CLI; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
 | M2 | Push path: create dirs, upload creates/revisions, verify, state commit | Push-only sync converges; second run is a no-op |
-| M3 | Pull path: staged download, local trash, remote index | Pull converges; interrupted download never corrupts a local file |
-| M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets | Truth-table suite green; live smoke passes; exit codes correct |
+| M3 | Pull path: staged download, local trash, remote index **(done)** | Pull converges; interrupted download never corrupts a local file |
+| M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets; planner truth table **(done)** | Truth-table suite green; live smoke passes; exit codes correct |
 | M5 | Polish: `status`, `history`, `rebuild`, JSON report, scheduler docs, published exe | Task Scheduler recipe works unattended for 7 days |
 
 v1 ships at M4; M5 is the "leave it running" bar.

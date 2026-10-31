@@ -23,6 +23,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\PdSync\PdSync.csproj" />
+    <ProjectReference Include="..\..\tools\FakeProtonCli\FakeProtonCli.csproj" ReferenceOutputAssembly="false" />
   </ItemGroup>
 
 </Project>

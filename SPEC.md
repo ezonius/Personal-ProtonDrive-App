@@ -752,6 +752,7 @@ tests/PdSync.Tests/             # xUnit: planner matrix, ignore, codec, config
 tests/PdSync.IntegrationTests/  # FakeProtonCli scenarios
 tests/PdSync.LiveTests/         # opt-in, real account, scratch folder
 tools/FakeProtonCli/            # scriptable stub used by integration tests
+tools/live-smoke.ps1            # real-account scratch-folder smoke test
 ```
 
 Deep-module boundaries: `ProtonCli` hides all process/JSON/path-encoding pain;
@@ -848,11 +849,18 @@ call costs ~2–4 s.
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 | Spikes S1–S14 | **Done 2026-10-31**: `docs/spikes.md`; S8 deferred, no blocking unknowns |
-| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, pure planner + remote index **(done)**, FakeProtonCli planner tests **(done)**, `doctor`, `plan` CLI **(done, fake-backed)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
-| M2 | Push path: create dirs, upload creates/revisions, verify, state commit **(done, fake-backed)** | Push-only sync converges; second run is a no-op |
-| M3 | Pull path: staged download, local trash, remote index **(done)**, executor **(done, fake-backed)** | Pull converges; interrupted download never corrupts a local file |
-| M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets; planner truth table **(done)**; executor/pending journal **(done, fake-backed)** | Truth-table suite green; live smoke passes; exit codes correct |
+| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, pure planner + remote index **(done)**, FakeProtonCli planner tests **(done)**, `doctor`, `plan` CLI **(done, live-smoked)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
+| M2 | Push path: create dirs, upload creates/revisions, verify, state commit **(done, live-smoked)** | Push-only sync converges; second run is a no-op |
+| M3 | Pull path: staged download, local trash, remote index **(done)**, executor **(done, live-smoked)** | Pull converges; interrupted download never corrupts a local file |
+| M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets; planner truth table **(done)**; executor/pending journal **(done, live-smoked)** | Truth-table suite green; live smoke passes; exit codes correct |
 | M5 | Polish: `status`, `history`, `rebuild`, JSON report, scheduler docs, published exe | Task Scheduler recipe works unattended for 7 days |
+
+**Live smoke 2026-10-31:** `tools/live-smoke.ps1` passed against the real
+account with a unique `/my-files/pdsync-live-smoke-*` scratch root. It covered
+initial push, no-op convergence, local edit/revision, remote-origin pull, remote
+delete → local trash, local delete → Proton Trash, ignored files, and fast/full
+mode. The script cleans up by trashing and permanently deleting its scratch root
+unless `-KeepRemote` is passed.
 
 v1 ships at M4; M5 is the "leave it running" bar.
 

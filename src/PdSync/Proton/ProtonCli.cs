@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace PdSync.Proton;
 
@@ -18,6 +19,13 @@ public sealed record ProtonNode(
     string? Sha1,
     bool Sha1Verified);
 
+public enum ProtonFailureKind
+{
+    Auth,
+    Transient,
+    Permanent,
+}
+
 public class ProtonCliException : Exception
 {
     public ProtonCliException(
@@ -26,7 +34,9 @@ public class ProtonCliException : Exception
         int exitCode,
         bool timedOut,
         string stdout,
-        string stderr)
+        string stderr,
+        ProtonFailureKind kind = ProtonFailureKind.Permanent,
+        int attempts = 1)
         : base(message)
     {
         Args = args;
@@ -34,6 +44,8 @@ public class ProtonCliException : Exception
         TimedOut = timedOut;
         Stdout = stdout;
         Stderr = stderr;
+        Kind = kind;
+        Attempts = attempts;
     }
 
     public IReadOnlyList<string> Args { get; }
@@ -41,6 +53,12 @@ public class ProtonCliException : Exception
     public bool TimedOut { get; }
     public string Stdout { get; }
     public string Stderr { get; }
+    public ProtonFailureKind Kind { get; }
+
+    /// <summary>Number of CLI attempts made, including the final failed one.</summary>
+    public int Attempts { get; }
+
+    public bool IsTransient => Kind == ProtonFailureKind.Transient;
 
     public string Command => "proton-drive " + string.Join(" ", Args.Select(Quote));
     private static string Quote(string value) =>
@@ -57,9 +75,49 @@ public sealed class ProtonAuthException : ProtonCliException
         int exitCode,
         bool timedOut,
         string stdout,
-        string stderr)
-        : base(message, args, exitCode, timedOut, stdout, stderr)
+        string stderr,
+        int attempts = 1)
+        : base(message, args, exitCode, timedOut, stdout, stderr, ProtonFailureKind.Auth, attempts)
     {
+    }
+}
+
+/// <summary>
+/// Bounded exponential backoff for transient CLI failures (SPEC §6.4).
+/// Only idempotent calls, and non-replayable calls rejected with 429 before
+/// execution, are retried; see <see cref="ProtonCli"/>.
+/// </summary>
+public sealed class ProtonRetryOptions
+{
+    public static ProtonRetryOptions Default { get; } = new();
+
+    /// <summary>Total attempts, including the first one. 3 means 2 retries.</summary>
+    public int MaxAttempts { get; init; } = 3;
+    public TimeSpan BaseDelay { get; init; } = TimeSpan.FromSeconds(1);
+    public TimeSpan MaxDelay { get; init; } = TimeSpan.FromSeconds(30);
+    /// <summary>Fractional jitter applied to each delay, e.g. 0.2 = ±20%.</summary>
+    public double Jitter { get; init; } = 0.2;
+
+    internal void Validate()
+    {
+        if (MaxAttempts < 1)
+            throw new ArgumentOutOfRangeException(nameof(MaxAttempts), "MaxAttempts must be at least 1");
+        if (BaseDelay <= TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(BaseDelay), "BaseDelay must be positive");
+        if (MaxDelay < BaseDelay)
+            throw new ArgumentOutOfRangeException(nameof(MaxDelay), "MaxDelay must be at least BaseDelay");
+        if (Jitter is < 0 or >= 1)
+            throw new ArgumentOutOfRangeException(nameof(Jitter), "Jitter must be in [0, 1)");
+    }
+
+    /// <summary>Delay after the given number of failed attempts (1-based).</summary>
+    internal TimeSpan DelayFor(int failedAttempts)
+    {
+        var milliseconds = BaseDelay.TotalMilliseconds * Math.Pow(2, failedAttempts - 1);
+        milliseconds = Math.Min(milliseconds, MaxDelay.TotalMilliseconds);
+        if (Jitter > 0)
+            milliseconds *= 1 + ((Random.Shared.NextDouble() * 2 - 1) * Jitter);
+        return TimeSpan.FromMilliseconds(Math.Max(1, milliseconds));
     }
 }
 
@@ -85,9 +143,19 @@ public sealed class ProtonCli
 {
     private readonly string _executable;
     private readonly TimeSpan _timeout;
+    private readonly ProtonRetryOptions _retry;
     private readonly object _gate = new();
 
-    public ProtonCli(string executable, TimeSpan? timeout = null)
+    private enum ProtonCallKind
+    {
+        /// <summary>Replaying the call converges to the same result (list/info/download).</summary>
+        Idempotent,
+
+        /// <summary>Replaying after an ambiguous failure could duplicate or reorder work.</summary>
+        NonReplayable,
+    }
+
+    public ProtonCli(string executable, TimeSpan? timeout = null, ProtonRetryOptions? retry = null)
     {
         if (string.IsNullOrWhiteSpace(executable))
             throw new ArgumentException("CLI executable is required", nameof(executable));
@@ -96,6 +164,9 @@ public sealed class ProtonCli
         _timeout = timeout ?? TimeSpan.FromMinutes(10);
         if (_timeout <= TimeSpan.Zero)
             throw new ArgumentOutOfRangeException(nameof(timeout), "timeout must be positive");
+
+        _retry = retry ?? ProtonRetryOptions.Default;
+        _retry.Validate();
     }
 
     public string Executable => _executable;
@@ -105,7 +176,7 @@ public sealed class ProtonCli
 
     public ProtonNode Info(string remotePath)
     {
-        var result = Run("fs", "info", "--json", EscapePath(remotePath));
+        var result = Run(ProtonCallKind.Idempotent, "fs", "info", "--json", EscapePath(remotePath));
         using var document = ParseJson(result, remotePath);
         if (document.RootElement.ValueKind != JsonValueKind.Object)
             throw InvalidJson(result, "expected one node object");
@@ -114,10 +185,10 @@ public sealed class ProtonCli
 
     public string GetVersion()
     {
-        var result = Run("--version");
+        var result = Run(ProtonCallKind.Idempotent, "--version");
         if (result.TimedOut)
             throw new ProtonCliException("timed out reading proton-drive --version", result.Args,
-                result.ExitCode, true, result.Stdout, result.Stderr);
+                result.ExitCode, true, result.Stdout, result.Stderr, ProtonFailureKind.Transient, result.Attempts);
         if (result.ExitCode != 0)
             throw CommandFailure(result, "reading --version");
 
@@ -127,7 +198,7 @@ public sealed class ProtonCli
 
     public ProtonNode CreateFolder(string parentPath, string name)
     {
-        var result = Run("fs", "create-folder", "--json", EscapePath(parentPath), name);
+        var result = Run(ProtonCallKind.NonReplayable, "fs", "create-folder", "--json", EscapePath(parentPath), name);
         using var document = ParseJson(result, parentPath);
         if (document.RootElement.ValueKind != JsonValueKind.Object)
             throw InvalidJson(result, "expected the created folder object");
@@ -137,6 +208,7 @@ public sealed class ProtonCli
     public UploadResult Upload(string localPath, string parentPath)
     {
         var result = Run(
+            ProtonCallKind.NonReplayable,
             "fs", "upload", "--json",
             "--file-conflict-strategy", "create-new-revision",
             LocalPathForCli(localPath), EscapePath(parentPath));
@@ -146,6 +218,7 @@ public sealed class ProtonCli
     public DownloadResult Download(string remotePath, string stagingDirectory)
     {
         var result = Run(
+            ProtonCallKind.Idempotent,
             "fs", "download", "--json",
             "--file-conflict-strategy", "remove",
             EscapePath(remotePath), stagingDirectory);
@@ -154,14 +227,14 @@ public sealed class ProtonCli
 
     public void Move(string sourcePath, string targetParentPath)
     {
-        var result = Run("fs", "move", "--json", EscapePath(sourcePath), EscapePath(targetParentPath));
+        var result = Run(ProtonCallKind.NonReplayable, "fs", "move", "--json", EscapePath(sourcePath), EscapePath(targetParentPath));
         using var document = ParseJson(result, sourcePath);
         _ = document.RootElement;
     }
 
     public void Rename(string remotePath, string newName)
     {
-        var result = Run("fs", "rename", "--json", EscapePath(remotePath), newName);
+        var result = Run(ProtonCallKind.NonReplayable, "fs", "rename", "--json", EscapePath(remotePath), newName);
         using var document = ParseJson(result, remotePath);
         _ = document.RootElement;
     }
@@ -173,14 +246,14 @@ public sealed class ProtonCli
 
         var args = new List<string> { "fs", "trash", "--json" };
         args.AddRange(remotePaths.Select(EscapePath));
-        var result = Run(args.ToArray());
+        var result = Run(ProtonCallKind.NonReplayable, args.ToArray());
         using var document = ParseJson(result, remotePaths[0]);
         _ = document.RootElement;
     }
 
     private IReadOnlyList<ProtonNode> ListRemote(string remotePath)
     {
-        var result = Run("fs", "list", "--json", EscapePath(remotePath));
+        var result = Run(ProtonCallKind.Idempotent, "fs", "list", "--json", EscapePath(remotePath));
         using var document = ParseJson(result, remotePath);
         if (document.RootElement.ValueKind != JsonValueKind.Array)
             throw InvalidJson(result, "expected a JSON array");
@@ -191,7 +264,39 @@ public sealed class ProtonCli
         return nodes;
     }
 
-    private CliResult Run(params string[] args)
+    private CliResult Run(params string[] args) =>
+        Run(ProtonCallKind.Idempotent, args);
+
+    /// <summary>
+    /// Runs one CLI command, retrying transient failures with exponential
+    /// backoff. Idempotent calls are retried on timeout, 429, 5xx, network
+    /// resets, and spawn failures. Non-replayable calls are only retried when
+    /// the CLI demonstrably did not execute the command (spawn failure or a
+    /// 429 rate-limit rejection), so a timed-out upload/trash is never replayed
+    /// blindly; the next run reconciles it from state.
+    /// </summary>
+    private CliResult Run(ProtonCallKind kind, params string[] args)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            var result = ExecuteOnce(args);
+            var classification = Classify(result);
+            if (classification is null)
+                return result with { Attempts = attempt };
+
+            var retryable = classification == ProtonFailureKind.Transient &&
+                            (kind == ProtonCallKind.Idempotent ||
+                             result.StartError is not null ||
+                             IsRateLimited(result));
+
+            if (!retryable || attempt >= _retry.MaxAttempts)
+                return result with { Attempts = attempt };
+
+            Thread.Sleep(_retry.DelayFor(attempt));
+        }
+    }
+
+    private CliResult ExecuteOnce(string[] args)
     {
         lock (_gate)
         {
@@ -215,13 +320,12 @@ public sealed class ProtonCli
             }
             catch (Exception ex)
             {
-                throw new ProtonCliException(
-                    $"could not start {_executable}: {ex.Message}",
-                    args,
-                    exitCode: -1,
-                    timedOut: false,
-                    stdout: string.Empty,
-                    stderr: string.Empty);
+                started.Stop();
+                return new CliResult(args, -1, false, string.Empty, string.Empty)
+                {
+                    Elapsed = started.Elapsed,
+                    StartError = ex.Message,
+                };
             }
 
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
@@ -244,6 +348,59 @@ public sealed class ProtonCli
         }
     }
 
+    private static ProtonFailureKind? Classify(CliResult result)
+    {
+        if (result.TimedOut)
+            return ProtonFailureKind.Transient;
+        if (result.ExitCode == 0)
+            return null;
+        if (result.ExitCode == 3)
+            return ProtonFailureKind.Auth;
+        if (result.StartError is not null)
+            return ProtonFailureKind.Transient;
+        if (IsRateLimited(result))
+            return ProtonFailureKind.Transient;
+
+        var text = result.Stderr + "\n" + result.Stdout;
+        return TransientPatterns.Any(pattern => pattern.IsMatch(text))
+            ? ProtonFailureKind.Transient
+            : ProtonFailureKind.Permanent;
+    }
+
+    private static bool IsRateLimited(CliResult result)
+    {
+        if (result.ExitCode == 429)
+            return true;
+        var text = result.Stderr + "\n" + result.Stdout;
+        return RateLimitPattern.IsMatch(text);
+    }
+
+    private static readonly Regex RateLimitPattern = new(
+        @"\b429\b|rate[\s_-]?limit|too many requests",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex[] TransientPatterns =
+    [
+        new(@"\bHTTP[ /]?5\d\d\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        new(@"\bstatus(?:[ =:]+| code )5\d\d\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        new(@"\b50[234]\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        new(@"service unavailable|internal server error|bad gateway|gateway time-?out|temporarily unavailable",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        new(@"ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|connection reset|connection refused|network (?:error|is unreachable)|fetch failed",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled),
+        new(@"\btimed out\b|\btimeout\b", RegexOptions.IgnoreCase | RegexOptions.Compiled),
+    ];
+
+    private static ProtonCliException SpawnFailure(CliResult result) => new(
+        $"could not start the proton-drive CLI: {result.StartError}",
+        result.Args,
+        result.ExitCode,
+        result.TimedOut,
+        result.Stdout,
+        result.Stderr,
+        ProtonFailureKind.Transient,
+        result.Attempts);
+
     private static JsonDocument ParseJson(CliResult result, string remotePath)
     {
         if (result.ExitCode == 3)
@@ -254,18 +411,25 @@ public sealed class ProtonCli
                 result.ExitCode,
                 result.TimedOut,
                 result.Stdout,
-                result.Stderr);
+                result.Stderr,
+                result.Attempts);
         }
+
+        if (result.StartError is not null)
+            throw SpawnFailure(result);
 
         if (result.TimedOut)
         {
             throw new ProtonCliException(
-                $"timed out after {result.Elapsed.TotalSeconds:0.#}s operating on {remotePath}",
+                $"timed out after {result.Elapsed.TotalSeconds:0.#}s operating on {remotePath} " +
+                $"(after {result.Attempts} attempt(s))",
                 result.Args,
                 result.ExitCode,
                 result.TimedOut,
                 result.Stdout,
-                result.Stderr);
+                result.Stderr,
+                ProtonFailureKind.Transient,
+                result.Attempts);
         }
 
         if (result.ExitCode != 0)
@@ -284,13 +448,16 @@ public sealed class ProtonCli
     private static ProtonCliException CommandFailure(CliResult result, string target)
     {
         var detail = string.IsNullOrWhiteSpace(result.Stderr) ? result.Stdout : result.Stderr;
+        var kind = Classify(result) ?? ProtonFailureKind.Permanent;
         return new ProtonCliException(
             $"proton-drive exited {result.ExitCode} operating on {target}: {detail.Trim()}",
             result.Args,
             result.ExitCode,
             result.TimedOut,
             result.Stdout,
-            result.Stderr);
+            result.Stderr,
+            kind,
+            result.Attempts);
     }
 
     private static T ParseTransfer<T>(
@@ -326,7 +493,9 @@ public sealed class ProtonCli
                 result.ExitCode,
                 result.TimedOut,
                 result.Stdout,
-                result.Stderr);
+                result.Stderr,
+                ProtonFailureKind.Permanent,
+                result.Attempts);
         }
 
         return factory(transferred, bytes, skipped, failed, failures);
@@ -350,7 +519,9 @@ public sealed class ProtonCli
         result.ExitCode,
         result.TimedOut,
         result.Stdout,
-        result.Stderr);
+        result.Stderr,
+        ProtonFailureKind.Permanent,
+        result.Attempts);
 
     private static ProtonNode ParseNode(JsonElement element)
     {
@@ -433,5 +604,7 @@ public sealed class ProtonCli
         string Stderr)
     {
         public TimeSpan Elapsed { get; init; } = TimeSpan.Zero;
+        public string? StartError { get; init; }
+        public int Attempts { get; init; } = 1;
     }
 }

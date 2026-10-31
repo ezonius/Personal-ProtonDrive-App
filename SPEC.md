@@ -562,6 +562,28 @@ same full/fast decision.
 | permanent | invalid path, quota exceeded, forbidden | fail that action, continue others, exit 1 |
 | conflict | CLI reports unexpected existing node | re-plan that path next run, never loop |
 
+Retry policy (implementation in `ProtonCli`, `ProtonRetryOptions`):
+
+- **Attempts:** 3 total (2 retries), base delay 1 s, doubling, capped at 30 s,
+  with ±20 % jitter. The whole attempt sequence runs inside the existing CLI
+  gate, so one account never sees parallel retries.
+- **Idempotent calls** (`fs list`, `fs info`, `--version`, `fs download`) retry
+  every transient failure. Download is replayed into the staging directory only,
+  so a partial first attempt cannot corrupt a local file.
+- **Non-replayable calls** (`fs create-folder`, `fs upload`, `fs move`,
+  `fs rename`, `fs trash`) are retried **only** when the command provably did
+  not execute: a process spawn failure or a 429 rate-limit rejection. A timeout
+  or 5xx on these is surfaced immediately; the next run reconciles from state
+  instead of risking a duplicate revision, folder, or trash operation.
+- **Auth failures are never retried** (`exit 3` stays `ProtonAuthException` and
+  exit code 3). Permanent failures are not retried either.
+- Per-item `failedItems > 0` in upload/download JSON is treated as a permanent
+  action failure; the executor's per-file retry path handles those.
+
+The classification is exposed as `ProtonCliException.Kind`
+(`Auth`/`Transient`/`Permanent`) plus `Attempts`, so callers and tests can
+reason about it without re-parsing stderr.
+
 The CLI's `--json` output and exit codes are parsed; if the CLI emits
 non-JSON noise on stdout, it is captured as a run-log artifact and classified as
 a permanent failure with the raw text in the error report.

@@ -241,8 +241,13 @@ Prefer behavior assertions over implementation details. The current suite is
   `fast: true` correctly; a fast decision still needs a full run every N runs.
 - **Cross-volume moves:** use `FileSystemUtil`, not raw `File.Move` /
   `Directory.Move`, when moving between `stateDir` and the sync root.
-- **Do not add retries casually.** `ProtonCli` currently has timeouts but no
-  exponential-backoff retry loop; retry semantics are still an open gap.
+- **Respect the retry classification.** `ProtonCli` retries transient failures
+  (timeout, 429, 5xx, network reset) with bounded exponential backoff, but only
+  for idempotent calls. Non-replayable calls (`create-folder`, `upload`, `move`,
+  `rename`, `trash`) retry only on spawn failure or a 429 rejection; a timeout
+  or 5xx is reported and reconciled next run. Never retry auth (`exit 3`) or
+  permanent failures. When adding a new CLI call, pass the correct
+  `ProtonCallKind`; do not add a second retry loop at the executor layer.
 
 ---
 
@@ -268,7 +273,9 @@ fast/full mode.
 Known gaps / likely next work:
 
 - No live test in the normal test suite; live smoke remains a manual script.
-- Transient retry/backoff is not implemented.
+- Transient retry/backoff is implemented in `ProtonCli`
+  (`ProtonRetryOptions`); FakeProtonCli scenario tests cover 429/5xx,
+  exhaustion, permanent failures, auth, and timeout recovery.
 - `logDir` is configured but structured run/action JSONL logging is not yet
   wired.
 - `init`, `ignore`, `history`, and `rebuild` are not implemented.

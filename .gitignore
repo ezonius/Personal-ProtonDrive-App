@@ -1,0 +1,9 @@
+bin/
+obj/
+tmp/
+.vs/
+*.user
+docs/spikes-results.json
+docs/spikes-results.md
+
+/proton-drive.exe

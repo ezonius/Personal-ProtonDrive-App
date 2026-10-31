@@ -152,7 +152,11 @@ syncs:
 Rules:
 
 - `remote` must be under a real CLI tree (`/my-files`, `/shared-with-me`,
-  `/devices`, …). `/`, `/trash`, `/photos`, `/albums` are rejected for v1.
+  `/devices`, …). `/`, `/trash`, `/photos`, `/albums` are rejected for v1, and a
+  section root such as `/my-files` is rejected as a sync root.
+- Local and remote roots are compared with the same folded identity used for
+  entries (NFC + lowercase), so roots differing only by case overlap and are
+  rejected on every platform.
 - `local` must be an existing absolute directory or a drive root is rejected.
 - Syncs must not overlap (nested local roots or nested remote roots) — they would
   fight over the same state and produce duplicate transfers.
@@ -274,6 +278,24 @@ and verification all use it.
 `file`, `dir`, `symlink`, `other`. Symlinks and special files are **skipped**
 with a warning (no following, no uploading). A path whose kind changes between
 file/dir is a conflict, never a silent replace.
+
+### 4.4 Local scan contract
+
+`LocalScanner` produces the L snapshot and the ignore verdicts:
+
+- Entries include directories and files, sorted by relative POSIX path. The
+  sync root itself is not an entry. Display paths are NFC; keys are folded
+  (`NFC + lowercase`).
+- Symlinks/reparse points, special files, and files modified inside
+  `settleSeconds` are never in `Entries`. They are reported in `Skipped` so the
+  planner cannot mistake a deliberate skip for a local deletion.
+- `IsComplete` is false when enumeration or hashing failed, or when a case
+  collision was found. The planner must not infer deletions from an incomplete
+  snapshot, and must never delete for a path in `Skipped`.
+- `IgnoreRules` is loaded once per scan from the sync's one ignore file, with
+  inline `exclude` patterns appended afterwards. Matching is case-sensitive by
+  default; parent-directory exclusion wins over a child negation, exactly as in
+  git. `Explain` reports the deciding rule and line.
 
 ---
 
@@ -579,6 +601,10 @@ runs(id INTEGER PK, sync_id, started_at, finished_at, status, stats_json)
 Rules:
 
 - The DB is the **only** source of truth for "what was synced last time".
+- `plan` opens the DB read-only. If it does not exist yet, `plan` uses an
+  in-memory empty baseline; it never creates, migrates, or backs up a file.
+  Schema migration happens only in `run`/`doctor`, after copying the DB to
+  `state/backup-<date>.sqlite`.
 - Every destructive or transfer action is preceded by a `pending` row and
   followed by a state update in the same transaction where possible.
 - On startup, `pending` rows are reconciled against current L/R (idempotent
@@ -672,9 +698,11 @@ src/PdSync/
     InitCommand.cs  DoctorCommand.cs  PlanCommand.cs  RunCommand.cs
     StatusCommand.cs  IgnoreCommand.cs  HistoryCommand.cs
   Config/
-    ConfigModel.cs              # YAML DTOs
-    ConfigLoader.cs             # discovery, env expansion, normalization
-    ConfigValidator.cs          # invariants, unknown-key rejection
+    ConfigModel.cs              # YAML DTOs + normalized model
+    ConfigLoader.cs             # discovery, YAML parse, unknown-key rejection
+    ConfigValidator.cs          # defaults, invariants, overlap checks
+    PathUtil.cs                 # env/~/absolute paths, comparisons
+    PathKey.cs                  # NFC + case-folded identity
   Proton/
     ProtonCli.cs                # process spawn, JSON, retries, timeouts
     RemotePath.cs               # codec, escaping, validation
@@ -800,7 +828,7 @@ call costs ~2–4 s.
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 | Spikes S1–S14 | **Done 2026-10-31**: `docs/spikes.md`; S8 deferred, no blocking unknowns |
-| M1 | Config, schema, state DB, local scan + ignore, `doctor`, `plan` with empty remote; FakeProtonCli harness **(done)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
+| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, `doctor`, `plan` with empty remote; FakeProtonCli harness **(done)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
 | M2 | Push path: create dirs, upload creates/revisions, verify, state commit | Push-only sync converges; second run is a no-op |
 | M3 | Pull path: staged download, local trash, remote index | Pull converges; interrupted download never corrupts a local file |
 | M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets | Truth-table suite green; live smoke passes; exit codes correct |

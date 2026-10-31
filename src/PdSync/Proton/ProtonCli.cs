@@ -63,6 +63,20 @@ public sealed class ProtonAuthException : ProtonCliException
     }
 }
 
+public sealed record UploadResult(
+    int TransferredItems,
+    long TransferredBytes,
+    int SkippedItems,
+    int FailedItems,
+    IReadOnlyList<string> Failures);
+
+public sealed record DownloadResult(
+    int TransferredItems,
+    long TransferredBytes,
+    int SkippedItems,
+    int FailedItems,
+    IReadOnlyList<string> Failures);
+
 /// <summary>
 /// The only class that spawns <c>proton-drive</c>. Calls are serialized because
 /// the CLI shares SQLite caches and one account rate limit (D8).
@@ -96,6 +110,72 @@ public sealed class ProtonCli
         if (document.RootElement.ValueKind != JsonValueKind.Object)
             throw InvalidJson(result, "expected one node object");
         return ParseNode(document.RootElement);
+    }
+
+    public string GetVersion()
+    {
+        var result = Run("--version");
+        if (result.TimedOut)
+            throw new ProtonCliException("timed out reading proton-drive --version", result.Args,
+                result.ExitCode, true, result.Stdout, result.Stderr);
+        if (result.ExitCode != 0)
+            throw CommandFailure(result, "reading --version");
+
+        var text = result.Stdout.Trim();
+        return text.Length == 0 ? "unknown" : text.Split('\n', 2)[0].Trim();
+    }
+
+    public ProtonNode CreateFolder(string parentPath, string name)
+    {
+        var result = Run("fs", "create-folder", "--json", EscapePath(parentPath), name);
+        using var document = ParseJson(result, parentPath);
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
+            throw InvalidJson(result, "expected the created folder object");
+        return ParseNode(document.RootElement);
+    }
+
+    public UploadResult Upload(string localPath, string parentPath)
+    {
+        var result = Run(
+            "fs", "upload", "--json",
+            "--file-conflict-strategy", "create-new-revision",
+            LocalPathForCli(localPath), EscapePath(parentPath));
+        return ParseTransfer<UploadResult>(result, parentPath, "upload", static (a, b, c, d, e) => new UploadResult(a, b, c, d, e));
+    }
+
+    public DownloadResult Download(string remotePath, string stagingDirectory)
+    {
+        var result = Run(
+            "fs", "download", "--json",
+            "--file-conflict-strategy", "remove",
+            EscapePath(remotePath), stagingDirectory);
+        return ParseTransfer<DownloadResult>(result, remotePath, "download", static (a, b, c, d, e) => new DownloadResult(a, b, c, d, e));
+    }
+
+    public void Move(string sourcePath, string targetParentPath)
+    {
+        var result = Run("fs", "move", "--json", EscapePath(sourcePath), EscapePath(targetParentPath));
+        using var document = ParseJson(result, sourcePath);
+        _ = document.RootElement;
+    }
+
+    public void Rename(string remotePath, string newName)
+    {
+        var result = Run("fs", "rename", "--json", EscapePath(remotePath), newName);
+        using var document = ParseJson(result, remotePath);
+        _ = document.RootElement;
+    }
+
+    public void Trash(params string[] remotePaths)
+    {
+        if (remotePaths.Length == 0)
+            return;
+
+        var args = new List<string> { "fs", "trash", "--json" };
+        args.AddRange(remotePaths.Select(EscapePath));
+        var result = Run(args.ToArray());
+        using var document = ParseJson(result, remotePaths[0]);
+        _ = document.RootElement;
     }
 
     private IReadOnlyList<ProtonNode> ListRemote(string remotePath)
@@ -180,7 +260,7 @@ public sealed class ProtonCli
         if (result.TimedOut)
         {
             throw new ProtonCliException(
-                $"timed out after {result.Elapsed.TotalSeconds:0.#}s listing {remotePath}",
+                $"timed out after {result.Elapsed.TotalSeconds:0.#}s operating on {remotePath}",
                 result.Args,
                 result.ExitCode,
                 result.TimedOut,
@@ -189,16 +269,7 @@ public sealed class ProtonCli
         }
 
         if (result.ExitCode != 0)
-        {
-            var detail = string.IsNullOrWhiteSpace(result.Stderr) ? result.Stdout : result.Stderr;
-            throw new ProtonCliException(
-                $"proton-drive exited {result.ExitCode} listing {remotePath}: {detail.Trim()}",
-                result.Args,
-                result.ExitCode,
-                result.TimedOut,
-                result.Stdout,
-                result.Stderr);
-        }
+            throw CommandFailure(result, remotePath);
 
         try
         {
@@ -208,6 +279,69 @@ public sealed class ProtonCli
         {
             throw InvalidJson(result, $"invalid JSON: {ex.Message}");
         }
+    }
+
+    private static ProtonCliException CommandFailure(CliResult result, string target)
+    {
+        var detail = string.IsNullOrWhiteSpace(result.Stderr) ? result.Stdout : result.Stderr;
+        return new ProtonCliException(
+            $"proton-drive exited {result.ExitCode} operating on {target}: {detail.Trim()}",
+            result.Args,
+            result.ExitCode,
+            result.TimedOut,
+            result.Stdout,
+            result.Stderr);
+    }
+
+    private static T ParseTransfer<T>(
+        CliResult result,
+        string target,
+        string operation,
+        Func<int, long, int, int, IReadOnlyList<string>, T> factory)
+    {
+        using var document = ParseJson(result, target);
+        if (document.RootElement.ValueKind != JsonValueKind.Object)
+            throw InvalidJson(result, "expected a transfer summary object");
+
+        var root = document.RootElement;
+        var transferred = GetInt32(root, "transferredItems") ?? 0;
+        var bytes = GetInt64(root, "transferredBytes") ?? 0;
+        var skipped = GetInt32(root, "skippedItems") ?? 0;
+        var failed = GetInt32(root, "failedItems") ?? 0;
+        var failures = new List<string>();
+        if (root.TryGetProperty("failures", out var failureArray) && failureArray.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var failure in failureArray.EnumerateArray())
+                failures.Add(failure.ValueKind == JsonValueKind.String
+                    ? failure.GetString() ?? string.Empty
+                    : failure.ToString());
+        }
+
+        if (failed > 0)
+        {
+            var detail = failures.Count == 0 ? "no failure detail" : string.Join("; ", failures);
+            throw new ProtonCliException(
+                $"proton-drive {operation} failed {failed} item(s) for {target}: {detail}",
+                result.Args,
+                result.ExitCode,
+                result.TimedOut,
+                result.Stdout,
+                result.Stderr);
+        }
+
+        return factory(transferred, bytes, skipped, failed, failures);
+    }
+
+    private static int? GetInt32(JsonElement parent, string property) =>
+        parent.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number &&
+        value.TryGetInt32(out var number)
+            ? number
+            : null;
+
+    private static string LocalPathForCli(string path)
+    {
+        // Staging paths are plain; escaping keeps ordinary bracketed names safe.
+        return PdSync.Scan.LocalPathGlob.Escape(path);
     }
 
     private static ProtonCliException InvalidJson(CliResult result, string detail) => new(
@@ -260,6 +394,7 @@ public sealed class ProtonCli
         parent.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
 
     private static long? GetInt64(JsonElement parent, string property) =>
         parent.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.Number &&

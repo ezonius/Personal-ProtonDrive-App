@@ -546,6 +546,13 @@ acted on with stale data.
 is configured. `doctor` reports the age of the last full scan so an operator can
 see how much remote reality is being deferred.
 
+Implementation: `FastRemoteScan` builds the skip predicate from the baseline and
+local scan; `RemoteIndex` synthesizes entries for a skipped folder from B instead
+of listing it. `FastScanTracker` stores the number of fast runs since the last
+full listing in `<stateDir>/state/<syncId>.fast.json`; a full run resets it.
+`plan --fast` reads the counter without writing, so the next `run` makes the
+same full/fast decision.
+
 ### 6.4 Error taxonomy
 
 | Class | Examples | Handling |
@@ -571,6 +578,12 @@ signal, not as a security boundary.
 |---|---|---|
 | Upload | local SHA-1 == remote `claimedDigests.sha1` | one `fs list --json <parent>` per affected parent, after transfer |
 | Download | local size == remote `claimedSize`; AEAD decryption succeeded; local SHA-1 == digest from the remote listing when present | no extra call |
+
+Implementation: `Verifier` performs one parent listing per upload, compares size
+first, then the claimed SHA-1 when present. `sample` downloads back only a
+deterministic percentage of uploads whose digest is missing and whose size is at
+least `minSizeMb`; `full` downloads back every upload. A missing digest
+downgrades to size rather than failing the transfer.
 
 Modes (`verify.mode`):
 
@@ -701,9 +714,8 @@ Non-negotiable, enforced before any destructive action:
 pdsync.sln
 src/PdSync/
   Program.cs                    # entry point, exit-code mapping
-  Cli/                          # Spectre.Console.Cli commands
-    InitCommand.cs  DoctorCommand.cs  PlanCommand.cs  RunCommand.cs
-    StatusCommand.cs  IgnoreCommand.cs  HistoryCommand.cs
+  Cli/
+    CliApp.cs                   # plan/run/doctor/status parsing + reporters
   Config/
     ConfigModel.cs              # YAML DTOs + normalized model
     ConfigLoader.cs             # discovery, YAML parse, unknown-key rejection
@@ -711,29 +723,30 @@ src/PdSync/
     PathUtil.cs                 # env/~/absolute paths, comparisons
     PathKey.cs                  # NFC + case-folded identity
   Proton/
-    ProtonCli.cs                # process spawn, JSON, retries, timeouts
+    ProtonCli.cs                # process spawn, JSON, timeouts, write operations
     RemotePath.cs               # codec, escaping, validation
-    CliErrors.cs                # error taxonomy + stderr classification
+    RemoteSnapshot.cs            # R snapshot, uid/path lookups
   Scan/
     LocalScanner.cs             # walk, stat, settle check, symlink policy
     IgnoreRules.cs              # .pdignore + inline patterns, Explain()
     ContentHash.cs              # SHA-1 + size, hash cache
     LocalPathGlob.cs            # escape paths for the CLI's glob expansion
   Remote/
-    RemoteIndex.cs              # BFS listing, uid index, subtree cache
+    RemoteIndex.cs              # BFS listing + fast-mode baseline synthesis
+    FastRemoteScan.cs           # subtree predicate + full-scan counter
   Plan/
-    Actions.cs                  # Action/Conflict/Skip records
+    PlanModel.cs                # Action/Conflict/Skip/Stats records
     Planner.cs                  # pure decision engine
-    ConflictPolicy.cs           # policy application, conflict naming
   Exec/
-    Executor.cs                 # phase ordering, action application
-    Staging.cs                  # temp download, verify, canonical-name upload
-    LocalTrash.cs               # trash moves + manifests
-    Journal.cs                  # pending ops, crash reconciliation
+    SyncService.cs              # prepare snapshots + plan/run orchestration
+    Executor.cs                 # phase ordering, action application, pending journal
+    Verifier.cs                 # upload/download size + SHA-1 checks
+    SafetyGuard.cs              # deletion budget + empty-tree guard
+    LocalTrashStore.cs          # trash moves + manifests
+    RunLock.cs                  # per-sync lock
+    FileSystemUtil.cs           # cross-volume move fallback
   State/
     StateStore.cs               # SQLite, migrations, transactions
-  Report/
-    HumanReporter.cs  JsonReporter.cs
 
 tests/PdSync.Tests/             # xUnit: planner matrix, ignore, codec, config
 tests/PdSync.IntegrationTests/  # FakeProtonCli scenarios
@@ -835,10 +848,10 @@ call costs ~2–4 s.
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 | Spikes S1–S14 | **Done 2026-10-31**: `docs/spikes.md`; S8 deferred, no blocking unknowns |
-| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, pure planner + remote index **(done)**, FakeProtonCli planner tests **(done)**, `doctor`, `plan` CLI; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
-| M2 | Push path: create dirs, upload creates/revisions, verify, state commit | Push-only sync converges; second run is a no-op |
-| M3 | Pull path: staged download, local trash, remote index **(done)** | Pull converges; interrupted download never corrupts a local file |
-| M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets; planner truth table **(done)** | Truth-table suite green; live smoke passes; exit codes correct |
+| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, pure planner + remote index **(done)**, FakeProtonCli planner tests **(done)**, `doctor`, `plan` CLI **(done, fake-backed)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
+| M2 | Push path: create dirs, upload creates/revisions, verify, state commit **(done, fake-backed)** | Push-only sync converges; second run is a no-op |
+| M3 | Pull path: staged download, local trash, remote index **(done)**, executor **(done, fake-backed)** | Pull converges; interrupted download never corrupts a local file |
+| M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets; planner truth table **(done)**; executor/pending journal **(done, fake-backed)** | Truth-table suite green; live smoke passes; exit codes correct |
 | M5 | Polish: `status`, `history`, `rebuild`, JSON report, scheduler docs, published exe | Task Scheduler recipe works unattended for 7 days |
 
 v1 ships at M4; M5 is the "leave it running" bar.

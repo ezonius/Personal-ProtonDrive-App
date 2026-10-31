@@ -1,0 +1,681 @@
+using System.Globalization;
+using System.Text.Json;
+using PdSync.Config;
+using PdSync.Plan;
+using PdSync.Proton;
+using PdSync.Remote;
+using PdSync.Scan;
+using PdSync.State;
+
+namespace PdSync.Exec;
+
+public sealed record ActionOutcome(PlanAction Action, bool Success, string? Error = null);
+
+public sealed class ExecutionReport
+{
+    public ExecutionReport(
+        IReadOnlyList<ActionOutcome> outcomes,
+        IReadOnlyList<PlanAdoption> adoptions,
+        IReadOnlyList<string> prunedRemoteDirectories)
+    {
+        Outcomes = outcomes;
+        Adoptions = adoptions;
+        PrunedRemoteDirectories = prunedRemoteDirectories;
+    }
+
+    public IReadOnlyList<ActionOutcome> Outcomes { get; }
+    public IReadOnlyList<PlanAdoption> Adoptions { get; }
+    public IReadOnlyList<string> PrunedRemoteDirectories { get; }
+    public int Failed => Outcomes.Count(o => !o.Success);
+    public int Succeeded => Outcomes.Count(o => o.Success);
+}
+
+/// <summary>
+/// Executes one <see cref="PlanResult"/> and commits successful state changes.
+/// Every destructive or transfer action is journaled in <c>pending</c> before
+/// the CLI call and removed in the same transaction as its state update.
+/// </summary>
+public sealed class Executor
+{
+    private readonly PdsyncConfig _config;
+    private readonly SyncConfig _sync;
+    private readonly ProtonCli _cli;
+    private readonly StateStore _state;
+    private readonly IReadOnlyList<EntryRecord> _baseline;
+    private readonly IReadOnlyDictionary<string, EntryRecord> _baseByKey;
+    private readonly LocalScan _local;
+    private readonly RemoteSnapshot _remote;
+    private readonly PlanResult _plan;
+    private readonly long _runId;
+    private readonly TextWriter _output;
+    private readonly bool _verbose;
+    private readonly LocalTrashStore _trash;
+    private readonly Verifier _verifier;
+    private readonly string _stagingRoot;
+    private readonly List<string> _failedPrefixes = new();
+    private readonly HashSet<string> _failedKeys = new(StringComparer.Ordinal);
+    private readonly List<string> _pruned = new();
+
+    public Executor(
+        PdsyncConfig config,
+        SyncConfig sync,
+        ProtonCli cli,
+        StateStore state,
+        IReadOnlyList<EntryRecord> baseline,
+        LocalScan local,
+        RemoteSnapshot remote,
+        PlanResult plan,
+        long runId,
+        TextWriter output,
+        bool verbose)
+    {
+        _config = config;
+        _sync = sync;
+        _cli = cli;
+        _state = state;
+        _baseline = baseline;
+        _baseByKey = baseline.ToDictionary(e => e.PathKey, StringComparer.Ordinal);
+        _local = local;
+        _remote = remote;
+        _plan = plan;
+        _runId = runId;
+        _output = output;
+        _verbose = verbose;
+        _trash = new LocalTrashStore(config, sync, runId);
+        _verifier = new Verifier(cli, sync.Options.Verify);
+        _stagingRoot = Path.Combine(config.StateDir, "tmp", runId.ToString(CultureInfo.InvariantCulture));
+    }
+
+    public ExecutionReport Execute(CancellationToken cancellationToken = default)
+    {
+        var outcomes = new List<ActionOutcome>();
+
+        try
+        {
+            foreach (var action in _plan.Actions)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (action.Kind == PlanActionKind.DropBase &&
+                    (_failedPrefixes.Any(prefix => action.PathKey == prefix.TrimEnd('/') ||
+                                                   action.PathKey.StartsWith(prefix, StringComparison.Ordinal)) ||
+                     _failedKeys.Contains(action.PathKey)))
+                {
+                    outcomes.Add(new ActionOutcome(action, false, "skipped: an earlier action failed"));
+                    continue;
+                }
+
+                if (action.Kind != PlanActionKind.DropBase && _failedKeys.Contains(action.PathKey))
+                {
+                    outcomes.Add(new ActionOutcome(action, false, "skipped: an earlier action for this path failed"));
+                    continue;
+                }
+
+                try
+                {
+                    ExecuteOne(action, outcomes);
+                }
+                catch (ProtonAuthException)
+                {
+                    throw;
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    outcomes.Add(new ActionOutcome(action, false, ex.Message));
+                    _failedKeys.Add(action.PathKey);
+                    if (action.IsDelete)
+                        _failedPrefixes.Add(action.PathKey + "/");
+                    _output.WriteLine($"FAILED {Describe(action)}: {ex.Message}");
+                }
+            }
+
+            foreach (var adoption in _plan.Adoptions)
+            {
+                try
+                {
+                    Adopt(adoption);
+                }
+                catch (Exception ex)
+                {
+                    outcomes.Add(new ActionOutcome(
+                        new PlanAction(PlanActionKind.DropBase, adoption.Path, adoption.PathKey,
+                            Reason: "adoption"),
+                        false, ex.Message));
+                    _output.WriteLine($"FAILED adopt {adoption.Path}: {ex.Message}");
+                }
+            }
+
+            FreezeIgnoredBaselines();
+
+            if (_sync.Options.PruneEmptyRemoteDirs && _plan.Actions.Any(a => a.IsDelete))
+                PruneEmptyRemoteDirectories(outcomes, cancellationToken);
+
+            _trash.SaveManifest();
+        }
+        finally
+        {
+            TryDeleteDirectory(_stagingRoot);
+        }
+
+        return new ExecutionReport(outcomes, _plan.Adoptions, _pruned);
+    }
+
+    private void ExecuteOne(PlanAction action, List<ActionOutcome> outcomes)
+    {
+        var pending = _state.AddPending(action.Kind.ToString(), action.Path,
+            JsonSerializer.Serialize(action));
+        try
+        {
+            _state.InTransaction(() =>
+            {
+                ExecuteAction(action);
+                ApplyState(action);
+                _state.RemovePending(pending);
+            });
+            outcomes.Add(new ActionOutcome(action, true));
+            if (_verbose)
+                _output.WriteLine($"ok     {Describe(action)}");
+        }
+        catch (OperationCanceledException)
+        {
+            try { _state.RemovePending(pending); } catch { /* best effort */ }
+            throw;
+        }
+        catch
+        {
+            try { _state.RemovePending(pending); } catch { /* best effort */ }
+            throw;
+        }
+    }
+
+    private void ExecuteAction(PlanAction action)
+    {
+        switch (action.Kind)
+        {
+            case PlanActionKind.CreateRemoteDirectory:
+                CreateRemoteDirectory(action);
+                break;
+            case PlanActionKind.CreateLocalDirectory:
+                CreateLocalDirectory(action);
+                break;
+            case PlanActionKind.DownloadCreate:
+            case PlanActionKind.DownloadReplace:
+            case PlanActionKind.DownloadRestore:
+                Download(action);
+                break;
+            case PlanActionKind.LocalConflictRename:
+                RenameLocal(action.Path, action.SecondaryPath
+                    ?? throw new SyncException("conflict rename has no target"));
+                break;
+            case PlanActionKind.UploadCreate:
+            case PlanActionKind.UploadRevision:
+            case PlanActionKind.KeepBothUpload:
+                Upload(action);
+                break;
+            case PlanActionKind.RemoteMove:
+                MoveRemote(action);
+                break;
+            case PlanActionKind.LocalMove:
+                MoveLocal(action);
+                break;
+            case PlanActionKind.LocalTrash:
+                TrashLocal(action);
+                break;
+            case PlanActionKind.RemoteTrash:
+                TrashRemote(action);
+                break;
+            case PlanActionKind.DropBase:
+                break;
+            default:
+                throw new SyncException($"unsupported action: {action.Kind}");
+        }
+    }
+
+    private void CreateRemoteDirectory(PlanAction action)
+    {
+        var (parent, name) = SplitRelative(action.Path);
+        var node = _cli.CreateFolder(RemoteFull(parent), name);
+        var local = _local.ByKey.GetValueOrDefault(action.PathKey);
+        StateSet(action.Path, EntryKind.Folder, local, node: node);
+    }
+
+    private void CreateLocalDirectory(PlanAction action)
+    {
+        var full = LocalFull(action.Path);
+        Directory.CreateDirectory(full);
+        var remote = _remote.Get(action.PathKey);
+        StateSet(action.Path, EntryKind.Folder, StatLocal(action.Path), remote: remote);
+    }
+
+    private void Upload(PlanAction action)
+    {
+        var localFull = LocalFull(action.Path);
+        if (!File.Exists(localFull))
+            throw new SyncException($"local file to upload is missing: {localFull}");
+
+        var (parent, localName) = SplitRelative(action.Path);
+        var existing = _remote.Get(action.PathKey);
+        var remoteName = existing is null ? localName : Leaf(existing.Path);
+        var uploadPath = localFull;
+        var staging = false;
+        var needsSafeName = LocalPathGlob.RequiresStaging(localFull) ||
+                            LocalPathGlob.RequiresStaging(remoteName);
+
+        if (!string.Equals(remoteName, localName, StringComparison.Ordinal) || needsSafeName)
+        {
+            var directory = Path.Combine(_stagingRoot, "upload", action.PathKey);
+            Directory.CreateDirectory(directory);
+            var stagedName = needsSafeName
+                ? "pdsync-upload-" + Guid.NewGuid().ToString("N")[..12]
+                : remoteName;
+            uploadPath = Path.Combine(directory, stagedName);
+            File.Copy(localFull, uploadPath, overwrite: true);
+            staging = true;
+        }
+
+        try
+        {
+            var result = _cli.Upload(uploadPath, RemoteFull(parent));
+            if (result.TransferredItems == 0 && result.SkippedItems == 0)
+                throw new SyncException($"upload reported no transfer for {action.Path}");
+
+            if (staging &&
+                !string.Equals(Path.GetFileName(uploadPath), remoteName, StringComparison.Ordinal))
+                _cli.Rename(RemoteFull(parent) + "/" + Path.GetFileName(uploadPath), remoteName);
+
+            var node = _verifier.VerifyUpload(RemoteFull(parent), remoteName, uploadPath);
+            StateSet(action.Path, EntryKind.File, StatLocal(action.Path), node: node);
+        }
+        finally
+        {
+            if (staging)
+                TryDeleteDirectory(Path.GetDirectoryName(uploadPath)!);
+        }
+    }
+
+    private void Download(PlanAction action)
+    {
+        var remote = _remote.GetByUid(action.RemoteUid) ?? _remote.Get(action.PathKey)
+            ?? throw new SyncException($"remote entry is missing for {action.Path}");
+
+        var parentRel = Parent(action.Path);
+        var name = Leaf(action.Path);
+        var staging = Path.Combine(_stagingRoot, "download", action.PathKey);
+        Directory.CreateDirectory(staging);
+
+        _cli.Download(RemoteFull(remote.Path), staging);
+        var downloaded = Path.Combine(staging, Leaf(remote.Path));
+        if (!File.Exists(downloaded))
+        {
+            var files = Directory.GetFiles(staging);
+            downloaded = files.Length == 1
+                ? files[0]
+                : throw new SyncException($"download did not produce exactly one file for {action.Path}");
+        }
+
+        _verifier.VerifyDownload(remote, downloaded);
+
+        var destination = LocalFull(action.Path);
+        var destinationDirectory = Path.GetDirectoryName(destination);
+        if (destinationDirectory is not null)
+            Directory.CreateDirectory(destinationDirectory);
+
+        if (File.Exists(destination) || Directory.Exists(destination))
+            _trash.Move(destination, action.Path, $"replaced during download ({action.Kind})");
+
+        FileSystemUtil.MoveFile(downloaded, destination, overwrite: true);
+        StateSet(action.Path, EntryKind.File, StatLocal(action.Path), remote: remote);
+    }
+
+    private void MoveRemote(PlanAction action)
+    {
+        var target = action.SecondaryPath
+            ?? throw new SyncException("remote move has no target");
+        var sourceFull = RemoteFull(action.Path);
+        var (targetParent, targetName) = SplitRelative(target);
+        var (sourceParent, sourceName) = SplitRelative(action.Path);
+
+        if (string.Equals(sourceParent, targetParent, StringComparison.Ordinal))
+        {
+            if (!string.Equals(sourceName, targetName, StringComparison.Ordinal))
+                _cli.Rename(sourceFull, targetName);
+        }
+        else
+        {
+            _cli.Move(sourceFull, RemoteFull(targetParent));
+            if (!string.Equals(sourceName, targetName, StringComparison.Ordinal))
+                _cli.Rename(RemoteFull(target), targetName);
+        }
+
+        MoveState(action, target);
+    }
+
+    private void MoveLocal(PlanAction action)
+    {
+        var target = action.SecondaryPath
+            ?? throw new SyncException("local move has no target");
+        var sourceFull = LocalFull(action.Path);
+        var targetFull = LocalFull(target);
+        Directory.CreateDirectory(Path.GetDirectoryName(targetFull)!);
+
+        if (Directory.Exists(sourceFull))
+            Directory.Move(sourceFull, targetFull);
+        else if (File.Exists(sourceFull))
+            File.Move(sourceFull, targetFull, overwrite: false);
+        else
+            throw new SyncException($"local source for move is missing: {sourceFull}");
+
+        MoveState(action, target);
+    }
+
+    private void MoveState(PlanAction action, string target)
+    {
+        var old = _baseByKey.GetValueOrDefault(action.PathKey)
+            ?? throw new SyncException($"baseline entry is missing for move {action.Path}");
+
+        var local = StatLocal(target)
+            ?? throw new SyncException($"moved local path is missing: {target}");
+        var remote = _remote.GetByUid(action.RemoteUid) ?? _remote.Get(action.PathKey);
+
+        EntryRecord moved;
+        if (remote is not null)
+        {
+            moved = EntryFromLocalRemote(target, local, remote);
+        }
+        else
+        {
+            moved = old with
+            {
+                Path = target,
+                PathKey = PathKey.Fold(target),
+                Size = local.Size,
+                MtimeMs = local.Mtime.ToUnixTimeMilliseconds(),
+                Sha1 = local.Sha1,
+                LocalPresent = true,
+                RemotePresent = old.RemotePresent,
+                LastSyncedAt = DateTimeOffset.UtcNow,
+            };
+        }
+
+        _state.DeleteEntry(action.PathKey);
+        _state.UpsertEntry(moved);
+    }
+
+    private void TrashLocal(PlanAction action)
+    {
+        var full = LocalFull(action.Path);
+        if (!File.Exists(full) && !Directory.Exists(full))
+            return;
+
+        _trash.Move(full, action.Path, "remote deletion");
+        _state.DeleteEntry(action.PathKey);
+    }
+
+    private void TrashRemote(PlanAction action)
+    {
+        _cli.Trash(RemoteFull(action.Path));
+        _state.DeleteEntry(action.PathKey);
+    }
+
+    private void Adopt(PlanAdoption adoption)
+    {
+        var local = _local.ByKey.GetValueOrDefault(adoption.PathKey);
+        var remote = _remote.Get(adoption.PathKey);
+        if (local is null || remote is null)
+            throw new SyncException("adoption source disappeared");
+
+        _state.UpsertEntry(EntryFromLocalRemote(adoption.Path, local, remote));
+    }
+
+    private void ApplyState(PlanAction action)
+    {
+        switch (action.Kind)
+        {
+            case PlanActionKind.DropBase:
+                _state.DeleteEntry(action.PathKey);
+                break;
+            // Other actions already wrote their state in their execute method.
+            default:
+                break;
+        }
+    }
+
+    private void FreezeIgnoredBaselines()
+    {
+        var ignored = _plan.Skipped
+            .Where(s => s.Reason == PlanSkipReason.Ignored)
+            .Select(s => s.PathKey);
+        _state.InTransaction(() =>
+        {
+            foreach (var key in ignored)
+                _state.MarkFrozen(key);
+        });
+    }
+
+    private void PruneEmptyRemoteDirectories(List<ActionOutcome> outcomes, CancellationToken cancellationToken)
+    {
+        RemoteSnapshot current;
+        try
+        {
+            current = RemoteIndex.Build(_cli, _sync.RemoteRoot);
+        }
+        catch (Exception ex) when (ex is not ProtonAuthException)
+        {
+            outcomes.Add(new ActionOutcome(
+                new PlanAction(PlanActionKind.RemoteTrash, string.Empty, string.Empty,
+                    Reason: "prune empty remote directories"),
+                false, ex.Message));
+            return;
+        }
+
+        var folders = current.Entries
+            .Where(e => e.IsDirectory)
+            .OrderByDescending(e => e.Path.Count(c => c == '/'))
+            .ThenByDescending(e => e.Path.Length)
+            .ToList();
+
+        var removed = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var folder in folders)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var key = folder.PathKey;
+            var prefix = key + "/";
+            var hasChild = current.Entries.Any(e =>
+                e.PathKey.StartsWith(prefix, StringComparison.Ordinal) &&
+                !removed.Contains(e.PathKey));
+            if (hasChild)
+                continue;
+
+            if (Directory.Exists(LocalFull(folder.Path)))
+                continue;
+
+            var pending = _state.AddPending("PruneRemoteDirectory", folder.Path);
+            try
+            {
+                _state.InTransaction(() =>
+                {
+                    _cli.Trash(RemoteFull(folder.Path));
+                    _state.DeleteEntry(key);
+                    _state.RemovePending(pending);
+                });
+                removed.Add(key);
+                _pruned.Add(folder.Path);
+                outcomes.Add(new ActionOutcome(
+                    new PlanAction(PlanActionKind.RemoteTrash, folder.Path, key,
+                        Reason: "prune empty remote directory"), true));
+                if (_verbose)
+                    _output.WriteLine($"ok     prune empty remote dir {folder.Path}");
+            }
+            catch (ProtonAuthException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                try { _state.RemovePending(pending); } catch { /* best effort */ }
+                outcomes.Add(new ActionOutcome(
+                    new PlanAction(PlanActionKind.RemoteTrash, folder.Path, key,
+                        Reason: "prune empty remote directory"), false, ex.Message));
+                _output.WriteLine($"FAILED prune {folder.Path}: {ex.Message}");
+            }
+        }
+    }
+
+    private void RenameLocal(string from, string to)
+    {
+        var source = LocalFull(from);
+        var destination = LocalFull(to);
+        var directory = Path.GetDirectoryName(destination);
+        if (directory is not null)
+            Directory.CreateDirectory(directory);
+
+        if (Directory.Exists(source))
+            Directory.Move(source, destination);
+        else if (File.Exists(source))
+            File.Move(source, destination, overwrite: false);
+        else
+            throw new SyncException($"local file for conflict rename is missing: {source}");
+    }
+
+    private void StateSet(
+        string path,
+        EntryKind kind,
+        LocalEntry? local,
+        RemoteEntry? remote = null,
+        ProtonNode? node = null)
+    {
+        var entry = node is not null
+            ? EntryFromNode(path, kind, local, node)
+            : remote is not null && local is not null
+                ? EntryFromLocalRemote(path, local, remote)
+                : remote is not null
+                    ? EntryFromRemote(path, kind, remote)
+                    : throw new SyncException($"no remote metadata for state entry {path}");
+        _state.UpsertEntry(entry);
+    }
+
+    private EntryRecord EntryFromLocalRemote(string path, LocalEntry local, RemoteEntry remote)
+    {
+        return new EntryRecord(
+            PathKey.Fold(path),
+            path,
+            remote.IsDirectory ? EntryKind.Folder : EntryKind.File,
+            local.IsDirectory ? 0 : local.Size,
+            local.Mtime.ToUnixTimeMilliseconds(),
+            local.IsDirectory ? null : local.Sha1,
+            remote.Uid,
+            remote.RevisionUid,
+            remote.Size,
+            remote.ClaimedMtime?.ToUnixTimeMilliseconds() ?? remote.ModifiedAt.ToUnixTimeMilliseconds(),
+            remote.Sha1,
+            LocalPresent: true,
+            RemotePresent: true,
+            Frozen: false,
+            LastSyncedAt: DateTimeOffset.UtcNow);
+    }
+
+    private EntryRecord EntryFromNode(string path, EntryKind kind, LocalEntry? local, ProtonNode node)
+    {
+        return new EntryRecord(
+            PathKey.Fold(path),
+            path,
+            kind,
+            kind == EntryKind.Folder ? 0 : local?.Size,
+            local?.Mtime.ToUnixTimeMilliseconds(),
+            kind == EntryKind.Folder ? null : local?.Sha1,
+            node.Uid,
+            node.RevisionUid,
+            node.Size,
+            (node.ClaimedMtime ?? node.ModifiedAt).ToUnixTimeMilliseconds(),
+            node.Sha1,
+            LocalPresent: local is not null,
+            RemotePresent: true,
+            Frozen: false,
+            LastSyncedAt: DateTimeOffset.UtcNow);
+    }
+
+    private EntryRecord EntryFromRemote(string path, EntryKind kind, RemoteEntry remote)
+    {
+        return new EntryRecord(
+            PathKey.Fold(path),
+            path,
+            kind,
+            null,
+            null,
+            null,
+            remote.Uid,
+            remote.RevisionUid,
+            remote.Size,
+            remote.ClaimedMtime?.ToUnixTimeMilliseconds() ?? remote.ModifiedAt.ToUnixTimeMilliseconds(),
+            remote.Sha1,
+            LocalPresent: false,
+            RemotePresent: true,
+            Frozen: false,
+            LastSyncedAt: DateTimeOffset.UtcNow);
+    }
+
+    private LocalEntry? StatLocal(string relativePath)
+    {
+        var full = LocalFull(relativePath);
+        if (Directory.Exists(full))
+        {
+            return new LocalEntry(relativePath, full, PathKey.Fold(relativePath),
+                LocalEntryKind.Directory, 0, new DirectoryInfo(full).LastWriteTimeUtc, null);
+        }
+
+        if (!File.Exists(full))
+            return null;
+
+        var info = new FileInfo(full);
+        return new LocalEntry(
+            relativePath,
+            full,
+            PathKey.Fold(relativePath),
+            LocalEntryKind.File,
+            info.Length,
+            info.LastWriteTimeUtc,
+            ContentHash.ComputeSha1(full));
+    }
+
+    private string LocalFull(string relativePath) =>
+        Path.Combine(_sync.LocalRoot, relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+    private string RemoteFull(string relativePath)
+    {
+        var root = RemotePath.Normalize(_sync.RemoteRoot);
+        return relativePath.Length == 0 ? root : root.TrimEnd('/') + "/" + relativePath;
+    }
+
+    private static (string Parent, string Name) SplitRelative(string relativePath)
+    {
+        var slash = relativePath.LastIndexOf('/');
+        return slash < 0
+            ? (string.Empty, relativePath)
+            : (relativePath[..slash], relativePath[(slash + 1)..]);
+    }
+
+    private static string Parent(string relativePath) => SplitRelative(relativePath).Parent;
+
+    private static string Leaf(string relativePath) => SplitRelative(relativePath).Name;
+
+    private static string Describe(PlanAction action) =>
+        action.Kind + " " + action.Path +
+        (action.SecondaryPath is null ? string.Empty : " -> " + action.SecondaryPath);
+
+    private static void TryDeleteDirectory(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+                Directory.Delete(path, recursive: true);
+        }
+        catch
+        {
+            // Staging remnants are harmless and can be cleaned by the next run.
+        }
+    }
+}

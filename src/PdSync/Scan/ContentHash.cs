@@ -26,6 +26,9 @@ public static class ContentHash
 
     public static string ComputeSha1(Stream stream) =>
         Convert.ToHexString(SHA1.HashData(stream)).ToLowerInvariant();
+
+    public static string ComputeSha1(ReadOnlySpan<byte> data) =>
+        Convert.ToHexString(SHA1.HashData(data)).ToLowerInvariant();
 }
 
 /// <summary>

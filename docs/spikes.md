@@ -104,7 +104,7 @@ already reflected in the spec:
 |---|---|---|
 | S8 auth expiry | Would break the authenticated session for the suite | Detect from stderr; add an opt-in fault-injection test later |
 | S15 restore by UID | Not yet probed | M1, using a collision with two same-named trash entries |
-| 429 / rate limits | Would require hammering the API | Retry with backoff; measure in a long run |
+| 429 / rate limits | Would require hammering the API | Retry with backoff implemented for all calls on 429 (request did not execute); idempotent calls also retry timeout/5xx/network resets. Measure tuning in a long live run. |
 | Large files / resume | Time and quota | M2, with a ≥1 GB file |
 | Long paths (>260) | Not exercised | M5, Windows-specific test |
 | Unicode normalization (NFC/NFD) | Windows host is NFC | Unit tests with crafted names |

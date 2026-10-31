@@ -743,9 +743,11 @@ cannot represent — that is the documented hard error.
    identical verdicts.
 3. **Path codec round-trip** — names with `/`, `\`, `\/`, `?`, `*`, emoji,
    combining marks, trailing spaces/dots (Windows), 255-byte names.
-4. **Fake CLI integration** — a scriptable stub that emits recorded JSON,
-   simulates auth expiry, timeouts, partial downloads, and a crash mid-action.
-   Assert reconciliation and no duplicate transfers on retry.
+4. **Fake CLI integration** — `tools/FakeProtonCli`: stateful, scenario-driven,
+   emits the recorded JSON shapes, mirrors SHA-1/skip/folder-mtime/case behavior,
+   and injects auth expiry, timeouts, failures, and truncated downloads. Tests
+   point `proton.cli` at its apphost, set `PDSYNC_FAKE_STATE`, seed a tree, and
+   assert state plus `invocations.jsonl`. Smoke: `tools/FakeProtonCli/smoke.ps1`.
 5. **Live smoke (opt-in)** — scratch remote folder `/my-files/pdsync-test`:
    create/modify/rename/delete both sides, conflict, ignore negation/anchoring, empty
    folders, large file, unicode names; then clean up.
@@ -798,7 +800,7 @@ call costs ~2–4 s.
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 | Spikes S1–S14 | **Done 2026-10-31**: `docs/spikes.md`; S8 deferred, no blocking unknowns |
-| M1 | Config, schema, state DB, local scan + ignore, `doctor`, `plan` with empty remote; FakeProtonCli harness; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
+| M1 | Config, schema, state DB, local scan + ignore, `doctor`, `plan` with empty remote; FakeProtonCli harness **(done)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
 | M2 | Push path: create dirs, upload creates/revisions, verify, state commit | Push-only sync converges; second run is a no-op |
 | M3 | Pull path: staged download, local trash, remote index | Pull converges; interrupted download never corrupts a local file |
 | M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets | Truth-table suite green; live smoke passes; exit codes correct |

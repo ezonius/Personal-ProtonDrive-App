@@ -11,6 +11,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tools", "tools", "{682A9AA3
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Spikes", "tools\Spikes\Spikes.csproj", "{09C6B83C-F1E3-4019-88F7-08041F8F50E4}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FakeProtonCli", "tools\FakeProtonCli\FakeProtonCli.csproj", "{424D5D88-7B09-4EAA-A541-7B40C6DE72D5}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -28,9 +30,14 @@ Global
 		{09C6B83C-F1E3-4019-88F7-08041F8F50E4}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{09C6B83C-F1E3-4019-88F7-08041F8F50E4}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{09C6B83C-F1E3-4019-88F7-08041F8F50E4}.Release|Any CPU.Build.0 = Release|Any CPU
+		{424D5D88-7B09-4EAA-A541-7B40C6DE72D5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{424D5D88-7B09-4EAA-A541-7B40C6DE72D5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{424D5D88-7B09-4EAA-A541-7B40C6DE72D5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{424D5D88-7B09-4EAA-A541-7B40C6DE72D5}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{B131C4AE-390F-4720-A610-791D87DE5CB7} = {89255ED1-8130-4F42-AA9F-2CB0297398D5}
 		{09C6B83C-F1E3-4019-88F7-08041F8F50E4} = {682A9AA3-F5FC-4474-9A41-BCC97F5B5489}
+		{424D5D88-7B09-4EAA-A541-7B40C6DE72D5} = {682A9AA3-F5FC-4474-9A41-BCC97F5B5489}
 	EndGlobalSection
 EndGlobal

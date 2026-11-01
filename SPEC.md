@@ -1026,7 +1026,9 @@ v1 ships at M4; M5 is the "leave it running" bar.
 
 ---
 
-## 14. Resolved decisions (2026-10-31)
+## 14. Resolved decisions
+
+### 2026-10-31
 
 | Question | Decision | Where it landed |
 |---|---|---|
@@ -1037,6 +1039,15 @@ v1 ships at M4; M5 is the "leave it running" bar.
 | `--fast` | allowed, approximate, with periodic full scans and a hard no-deletions rule | D13, §6.3 |
 | Case handling | case-folded identity, casing never synced, collisions abort | D14/D16, §5.4.1 |
 | Verification depth | remote plaintext SHA-1 (fallback size), sampled download-back for missing digests | D15, §6.5 |
+
+### 2026-11-01
+
+| Question | Decision | Where it landed |
+|---|---|---|
+| Post-transfer auth failure | Documentation-only for now: the failed CLI call is not retried, later actions stop, and no state is committed; a transfer that completed before verification/rename may exist remotely and is reconciled next run. Revisit stronger handling after staged-upload cleanup (#21). | §6.4, `docs/spikes.md` S8, #23 |
+| `init --yes` defaults | Accept current defaults: cwd as local root, derived sync name, `/my-files/<name>` remote root, and the default junk/temp/log ignore set. | §3.1, #27 |
+| `ignore --json` matched path | Git-shaped: `path` is the queried pathname; replace `matchedPath` with an optional `matchedAncestor` only when a parent-directory rule decides the result. | §3.3 rule 7, #25, implementation #29 |
+| `init` config inside the sync root | Append the generated config's relative POSIX path to the `.pdignore` produced by `init` when the config lies under the local root. | §3.1/§3.3, #28, implementation #30 |
 
 Still open (can be decided during M0/M4, not blocking design):
 

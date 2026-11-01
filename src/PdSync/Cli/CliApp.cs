@@ -47,7 +47,7 @@ public static class CliApp
             return parsed.ShowHelp ? 0 : 1;
         }
 
-        if (parsed.Command is not ("plan" or "run" or "doctor" or "status"))
+        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore"))
             return Unknown(parsed.Command, error);
 
         try
@@ -59,6 +59,7 @@ public static class CliApp
                 "run" => RunSync(config, parsed, output, error),
                 "doctor" => Doctor(config, parsed, output, error, desktopMappings ?? new DesktopMappingDetector()),
                 "status" => Status(config, parsed, output, error),
+                "ignore" => Ignore(config, parsed, output, error),
                 _ => Unknown(parsed.Command, error),
             };
         }
@@ -386,12 +387,152 @@ public static class CliApp
         return 0;
     }
 
+    /// <summary>
+    /// Explains the ignore verdict for one path (SPEC §3.3 rule 7). Read-only:
+    /// it loads config and the ignore file, and never opens the state DB, takes
+    /// the run lock, writes fast counters, or touches local/remote files.
+    /// </summary>
+    private static int Ignore(PdsyncConfig config, CliArguments args, TextWriter output, TextWriter error)
+    {
+        var request = ResolveIgnoreRequest(config, args);
+        IgnoreRules rules;
+        IgnoreDecision decision;
+        try
+        {
+            rules = IgnoreRules.Load(request.Sync);
+            decision = rules.Decide(request.RelativePath, request.IsDirectory);
+        }
+        catch (IgnoreRulesException ex)
+        {
+            throw new ConfigException($"ignore: {ex.Message}");
+        }
+        var ruleInfo = decision.RuleNumber is int number
+            ? rules.Rules.FirstOrDefault(rule => rule.Number == number)
+            : null;
+        var sourceKind = ruleInfo is null ? null : ruleInfo.LineNumber is null ? "exclude" : "file";
+        var matchedPath = decision.Pattern is null ? null : decision.MatchedPath;
+
+        if (args.Json)
+        {
+            WriteJson(output, new
+            {
+                command = "ignore",
+                sync = request.Sync.Name,
+                root = request.Sync.LocalRoot,
+                ignoreFile = rules.FilePath,
+                path = decision.Path,
+                kind = request.IsDirectory ? "directory" : "file",
+                ignored = decision.IsIgnored,
+                verdict = decision.IsIgnored ? "ignored" : "included",
+                pattern = decision.Pattern,
+                rule = decision.RuleNumber,
+                source = decision.Source,
+                sourceKind,
+                line = ruleInfo?.LineNumber,
+                matchedPath,
+            });
+            return 0;
+        }
+
+        var displayPath = decision.Path.Length == 0 ? "." : decision.Path;
+        output.WriteLine($"ignore {request.Sync.Name}: {displayPath} ({(request.IsDirectory ? "directory" : "file")})");
+        output.WriteLine($"  verdict: {(decision.IsIgnored ? "ignored" : "included")}");
+        if (decision.Pattern is null)
+        {
+            output.WriteLine($"  rule: none (ignore file: {rules.FilePath})");
+        }
+        else
+        {
+            var origin = ruleInfo?.LineNumber is int line
+                ? $"{rules.FilePath}:{line}"
+                : decision.Source;
+            var kind = sourceKind == "exclude" ? "inline exclude" : "ignore file";
+            output.WriteLine($"  rule: #{decision.RuleNumber} \"{decision.Pattern}\" ({origin}, {kind})");
+            if (matchedPath is not null && matchedPath != decision.Path)
+                output.WriteLine($"  matched ancestor: {matchedPath}");
+        }
+        return 0;
+    }
+
+    private sealed record IgnoreRequest(SyncConfig Sync, string RelativePath, bool IsDirectory);
+
+    private static IgnoreRequest ResolveIgnoreRequest(PdsyncConfig config, CliArguments args)
+    {
+        if (args.PathArgument is null)
+            throw new ConfigException("ignore: a <path> argument is required");
+
+        var raw = args.PathArgument;
+        var isDirectory = HasDirectoryIntent(raw);
+        var syncs = SelectSyncs(config, args.SyncNames);
+        if (syncs.Count == 0)
+            throw new ConfigException("ignore: no enabled syncs selected");
+
+        var expanded = PathUtil.Expand(raw);
+        if (Path.IsPathRooted(expanded))
+        {
+            string absolute;
+            try
+            {
+                absolute = PathUtil.TrimEnd(Path.GetFullPath(expanded));
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                throw new ConfigException($"ignore: invalid path '{raw}': {ex.Message}");
+            }
+
+            var matches = syncs.Where(sync => PathUtil.IsSameOrUnder(absolute, sync.LocalRoot)).ToList();
+            if (matches.Count == 0)
+            {
+                throw new ConfigException(
+                    $"ignore: '{raw}' is not inside any selected sync root ({string.Join(", ", syncs.Select(sync => sync.LocalRoot))})");
+            }
+            if (matches.Count > 1)
+            {
+                throw new ConfigException(
+                    $"ignore: '{raw}' matches multiple sync roots ({string.Join(", ", matches.Select(sync => sync.Name))}); pass --sync <name>");
+            }
+
+            var sync = matches[0];
+            var relative = Path.GetRelativePath(sync.LocalRoot, absolute);
+            if (relative == ".")
+                relative = string.Empty;
+            return new IgnoreRequest(sync, NormalizeIgnorePath(relative, raw), isDirectory);
+        }
+
+        if (syncs.Count > 1)
+        {
+            throw new ConfigException(
+                $"ignore: relative path '{raw}' is ambiguous across syncs ({string.Join(", ", syncs.Select(sync => sync.Name))}); pass --sync <name> or a rooted path");
+        }
+
+        return new IgnoreRequest(syncs[0], NormalizeIgnorePath(raw, raw), isDirectory);
+    }
+
+    private static string NormalizeIgnorePath(string relativePath, string original)
+    {
+        try
+        {
+            return IgnoreRules.NormalizeRelativePath(relativePath);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ConfigException($"ignore: invalid path '{original}': {ex.Message}");
+        }
+    }
+
+    /// <summary>A trailing separator means "explain this as a directory".</summary>
+    private static bool HasDirectoryIntent(string rawPath) =>
+        rawPath.Length > 0 &&
+        (rawPath[^1] == '/' || rawPath[^1] == '\\') &&
+        !PathUtil.IsDriveOrFilesystemRoot(rawPath);
+
     private static List<SyncConfig> SelectSyncs(PdsyncConfig config, IReadOnlyList<string> names)
     {
         if (names.Count == 0)
             return config.Syncs.Where(s => s.Enabled).ToList();
 
         var result = new List<SyncConfig>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var name in names)
         {
             var match = config.Syncs.FirstOrDefault(s =>
@@ -400,7 +541,8 @@ public static class CliApp
                 throw new ConfigException($"unknown sync '{name}'");
             if (!match.Enabled)
                 throw new ConfigException($"sync '{name}' is disabled");
-            result.Add(match);
+            if (seen.Add(match.Name))
+                result.Add(match);
         }
         return result;
     }
@@ -514,9 +656,12 @@ public static class CliApp
               run  [sync...]      apply actions and commit state
               doctor              check CLI, auth, roots, state
               status [sync...]    recent runs and pending rows
+              ignore <path>       explain the ignore rule for a path; never writes
 
             Options:
               --config <path>     explicit config file
+              --sync <name>       select a sync by name (repeatable)
+              --                  end of options (e.g. ignore -- -draft.txt)
               --fast              incremental remote listing
               --full              force a complete remote listing
               --force             override the deletion budget
@@ -537,18 +682,32 @@ public static class CliApp
         public bool Verbose { get; private set; }
         public bool Interactive { get; private set; }
         public bool ShowHelp { get; private set; }
+        public string? PathArgument { get; private set; }
         public List<string> SyncNames { get; } = new();
 
         public static CliArguments Parse(string[] args)
         {
             var result = new CliArguments();
+            var endOfOptions = false;
             for (var i = 0; i < args.Length; i++)
             {
                 var arg = args[i];
+                if (endOfOptions)
+                {
+                    result.AddPositional(arg);
+                    continue;
+                }
+
                 switch (arg)
                 {
+                    case "--":
+                        endOfOptions = true;
+                        break;
                     case "--config":
                         result.ConfigPath = Next(args, ref i, "--config");
+                        break;
+                    case "--sync":
+                        result.SyncNames.Add(Next(args, ref i, "--sync"));
                         break;
                     case "--json":
                         result.Json = true;
@@ -580,12 +739,12 @@ public static class CliApp
                     default:
                         if (arg.StartsWith("--config=", StringComparison.Ordinal))
                             result.ConfigPath = arg["--config=".Length..];
+                        else if (arg.StartsWith("--sync=", StringComparison.Ordinal))
+                            result.SyncNames.Add(arg["--sync=".Length..]);
                         else if (arg.StartsWith('-'))
                             throw new ArgumentException($"unknown option '{arg}'");
-                        else if (result.Command is null)
-                            result.Command = arg;
                         else
-                            result.SyncNames.Add(arg);
+                            result.AddPositional(arg);
                         break;
                 }
             }
@@ -594,6 +753,16 @@ public static class CliApp
                 throw new ArgumentException("--fast and --full are mutually exclusive");
 
             return result;
+        }
+
+        private void AddPositional(string arg)
+        {
+            if (Command is null)
+                Command = arg;
+            else if (Command == "ignore" && PathArgument is null)
+                PathArgument = arg;
+            else
+                SyncNames.Add(arg);
         }
 
         private static string Next(string[] args, ref int index, string option)

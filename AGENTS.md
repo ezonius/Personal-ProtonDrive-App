@@ -37,6 +37,7 @@ src/PdSync/bin/Debug/net8.0/PdSync.exe plan --config .\pdsync.yaml
 src/PdSync/bin/Debug/net8.0/PdSync.exe run  --config .\pdsync.yaml
 src/PdSync/bin/Debug/net8.0/PdSync.exe doctor --config .\pdsync.yaml
 src/PdSync/bin/Debug/net8.0/PdSync.exe status --config .\pdsync.yaml
+src/PdSync/bin/Debug/net8.0/PdSync.exe ignore path/to/file --config .\pdsync.yaml
 
 # Live smoke test against the real account (creates and cleans a scratch folder)
 pwsh -NoProfile -File tools/live-smoke.ps1
@@ -44,8 +45,10 @@ pwsh -NoProfile -File tools/live-smoke.ps1
 ```
 
 `--fast`, `--full`, `--force`, `--json`, `--verbose`, `--interactive`,
-`--yes`, `--no-color`, and `--config` are recognized. `plan`, `run`, `doctor`,
-and `status` are implemented; `init`, `ignore`, `history`, and `rebuild` are not.
+`--yes`, `--no-color`, `--config`, and `--sync` are recognized. `plan`, `run`,
+`doctor`, `status`, and `ignore` are implemented; `init`, `history`, and
+`rebuild` are not. `ignore` reports the deciding rule for a path and is
+read-only.
 
 ### Agent role skills
 
@@ -209,11 +212,12 @@ parallelism is otherwise disabled in the assembly/test setup.
 - End-to-end CLI/executor behavior: add cases in `CliFakeTests.cs`.
 - Remote-index/fake integration: `PlannerFakeTests.cs`.
 - Ignore/MAB behavior: `IgnoreRulesTests.cs`.
+- Ignore explanation and path resolution: `IgnoreExplainTests.cs`.
 - Path folding/validation: `ConfigTests.cs`, `StateStoreTests.cs`.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 
 Prefer behavior assertions over implementation details. The current suite is
-**207 tests**.
+**226 tests**.
 
 ---
 
@@ -290,6 +294,11 @@ Implemented and fake-tested:
 - Pure planner: creates, updates, deletes, conflicts, renames, adoption,
   directory ordering, incomplete scans.
 - `plan`, `run`, `doctor`, `status` CLI.
+- `ignore` CLI (SPEC §3.3 rule 7): resolves a relative or rooted path against a
+  sync root and explains the deciding rule via `IgnoreRules.Decide` — verdict,
+  pattern, rule number, ignore-file line or inline `exclude[i]`, and matched
+  ancestor. A trailing separator asks for directory intent; `--json` is stable.
+  Read-only: no state DB open/create, run lock, fast counter, or log files.
 - Executor: uploads/downloads, staging, verification, state commits, pending
   journal, local trash, Proton Trash, pruning, safety budgets, lock.
 - Fast/full mode and tracker.
@@ -310,7 +319,7 @@ Known gaps / likely next work:
   exhaustion, permanent failures, auth, and timeout recovery.
 - `logDir` JSONL run/action/verification logging is implemented; `history`
   does not read it yet.
-- `init`, `ignore`, `history`, and `rebuild` are not implemented.
+- `init`, `history`, and `rebuild` are not implemented.
 - Interactive conflict prompting is not implemented; `ask` currently uses the
   non-interactive fallback.
 - S15 restore-by-UID is not wired (restore is not used by the sync engine yet).

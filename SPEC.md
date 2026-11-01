@@ -65,9 +65,9 @@ deduplication, or bypassing Proton's encryption.
 
 ```
 pdsync init                      # create config + .pdignore interactively
-pdsync doctor [--json]           # binary, version, auth, paths, overlaps, state
+pdsync doctor [--json]           # binary, version, auth, paths, overlaps, state, staged leftovers
 pdsync plan [sync...] [--json]   # show what would happen; never writes
-pdsync run  [sync...] [--json]   # apply
+pdsync run  [sync...] [--json] [--cleanup-staged]  # apply
 pdsync status [--json]           # last run per sync, pending conflicts
 pdsync ignore <path>             # explain which pattern matched (debug)
 pdsync trash list [--sync <name>] [--json]   # local trash inventory; never writes
@@ -78,8 +78,11 @@ pdsync rebuild <sync> --policy=… # rebuild state from local+remote (last resor
 
 Global flags: `--config <path>`, `--verbose`, `--json`, `--no-color`, `--yes`.
 Per-run flags: `--fast` (incremental remote listing), `--full` (force a complete
-scan, overriding `--fast`), `--force` (override the deletion budget).
-`plan` accepts the same scan flags so its output matches the run it predicts.
+scan, overriding `--fast`), `--force` (override the deletion budget), and
+`--cleanup-staged` (run only: also Proton-Trash adopted/historical staging
+leftovers, §6.2). `plan` accepts the same scan flags so its output matches the
+run it predicts; it rejects `--cleanup-staged` (exit 1) so a normal `plan` is
+never a preview of the opt-in cleanup divergence.
 
 `init` creates a config and a default `.pdignore`. It resolves the config
 location with the same order as loading: `--config` or `PDSYNC_CONFIG` always
@@ -430,10 +433,20 @@ it never invents content.
 **Staging-leftover footnote.** When B is absent, L is absent, and R is a file
 whose leaf is exactly `pdsync-upload-` followed by 12 lowercase hex characters,
 the action is `cleanup.staged-upload` (Proton Trash) instead of
-`download.create`. Baseline-tracked, adopted, non-matching, and directory nodes
-never take this branch. `cleanup.staged-upload` is not a user deletion: it is
-excluded from `PlanAction.IsDelete`, does not increment `PlanStats.Deletions`,
-and is excluded from the §8 deletion budget.
+`download.create`, with the reason prefix `automatic cleanup:`. Baseline-tracked,
+adopted, non-matching, and directory nodes never take this automatic branch.
+
+**Opt-in staging cleanup.** `run --cleanup-staged` adds a second branch for the
+adopted/historical case: the local scan is complete, B is present, L is absent,
+and R is a file whose leaf matches the same exact grammar. It produces `cleanup.staged-upload` with the
+reason prefix `opt-in cleanup:` instead of the normal delete-vs-modify,
+`download.restore`, or `remote.trash` decision. The local-absent guard is
+deliberate: trashing a node that still has a local counterpart would simply be
+re-uploaded by the next run. Normal runs, `plan`, and a run without the flag
+never take this branch, so the merged #21 behavior is unchanged.
+`cleanup.staged-upload` is not a user deletion from either branch: it is excluded
+from `PlanAction.IsDelete`, does not increment `PlanStats.Deletions`, and is
+excluded from the §8 deletion budget.
 
 ### 5.2 Conflicts
 
@@ -592,8 +605,13 @@ Notes:
   exception: the session is gone, so same-run cleanup is skipped and the next
   run handles the leftover. Any remote-only leftover whose leaf matches the
   exact staging grammar and is not in the baseline is trashed by the next run as
-  a `cleanup staged upload` action, never downloaded or treated as a conflict.
-  Both paths use Proton Trash, never permanent deletion.
+  an `automatic cleanup` staging action, never downloaded or treated as a
+  conflict. A staging node that is already in the baseline (adopted or
+  historical, including pre-#21 leftovers) is never touched automatically: a
+  normal run may restore it or conflict exactly as it would for ordinary user
+  content. `run --cleanup-staged` is the explicit opt-in that instead trashes a
+  baseline-recorded, local-absent staging node with the `opt-in cleanup` reason.
+  Both cleanup paths use Proton Trash, never permanent deletion.
 - Downloads are **always per file** into a staging directory, never a recursive
   folder download, so we control replacement and verification.
 - All calls are serialized. Parallelism is intentionally not used: the CLI shares
@@ -686,8 +704,14 @@ Retry policy (implementation in `ProtonCli`, `ProtonRetryOptions`):
   node may already exist. Same-run cleanup is deliberately **skipped** for
   auth-classified failures: the session is gone, so a second CLI call cannot
   succeed and risks a second auth error or stall. The next run's
-  `cleanup staged upload` action trashes the matching baseline-absent leftover
-  instead of downloading it. For non-auth rename/verification failures after
+  `automatic cleanup` action trashes the matching baseline-absent leftover
+  instead of downloading it. The automatic cleanup branch never applies to a
+  leftover that is already recorded in the baseline; ordinary delete/restore
+  semantics still do, so an unchanged remote with a deleted local counterpart is
+  an ordinary local-delete → `remote.trash` (subject to the deletion budget),
+  while a modified remote is restored or conflicts normally. The explicit
+  `run --cleanup-staged` opt-in is the only way to treat such a baseline-recorded
+  node as staging cleanup. For non-auth rename/verification failures after
   the upload result was received, the executor best-effort trashes the
   just-created staged node before rethrowing the original failure (cleanup
   errors never mask it).
@@ -762,7 +786,15 @@ mapping's `Local.RootFolderPath` with every configured sync `local` root.
   crashes and only reads files.
 - `doctor` as a whole is not write-free: its existing state-DB check may still
   open or migrate an existing database exactly as before (§7). The mapping probe
-  does not touch the state DB.
+  and the staged-leftover probe do not write: the latter opens the baseline
+  read-only and performs one complete remote listing. It reports every
+  unfrozen, non-ignored, grammar-matching remote file already present in the
+  baseline (adopted or historical) as `sync <name> staged leftovers` with path
+  and UID; a warning does not fail `doctor`. This is a candidate set: the probe
+  does not scan local presence or check the incomplete-local-scan guard, so
+  `run --cleanup-staged` acts only on candidates that are also locally absent in
+  a complete scan. Baseline-absent leftovers belong to the automatic path and
+  are not reported here.
 - Overlap is classified with pdsync's identity rules (NFC + case-folded,
   segment-aware): exact, local root inside a mapping, or mapping inside a local
   root. Sibling names sharing a string prefix do not overlap. Symlink, junction,
@@ -902,17 +934,22 @@ Non-negotiable, enforced before any destructive action:
 
 1. Never delete/trash remotely unless `onLocalDelete: remote-trash` and the
    entry exists in B with `L` gone and `RΔ = 0`. **Exception:**
-   `cleanup.staged-upload` may Proton-Trash a remote-only, baseline-absent file
-   whose leaf is exactly `pdsync-upload-<12 lowercase hex>`; it never applies to
-   baseline-tracked, adopted, non-matching, or directory nodes.
+   `cleanup.staged-upload` may Proton-Trash a remote-only file whose leaf is
+   exactly `pdsync-upload-<12 lowercase hex>`, either automatically when it is
+   baseline-absent or under the explicit `run --cleanup-staged` opt-in when it
+   is baseline-recorded and `L` is absent in a complete local scan. It never
+   applies to non-matching or directory nodes, and the opt-in branch never
+   applies while a local counterpart exists (including when the scan is
+   incomplete and the file is merely unscanned).
 2. Never delete a local file except into the local trash; never `unlink` a
    synced file directly.
 3. **Deletion budget**: abort the run before executing deletions if
    `maxDeletes` or `maxDeletePercent` would be exceeded, unless `--force`.
    Prevents a bad ignore pattern or a detached drive from wiping a tree.
    `cleanup.staged-upload` is excluded from this budget (and from
-   `PlanStats.Deletions`): it is baseline-absent orphan cleanup, not a user
-   deletion, and a backlog of leftovers must never block its own cleanup.
+   `PlanStats.Deletions`) on both the automatic baseline-absent path and the
+   `run --cleanup-staged` opt-in path: it is orphan cleanup, not a user deletion,
+   and a backlog of leftovers must never block its own cleanup.
 4. Refuse to run if the local root is missing, empty-but-previously-non-empty, or
    not a directory. "Empty" is a hard stop when B has entries, not a silent mass
    delete.
@@ -1157,7 +1194,7 @@ v1 ships at M4; M5 is the "leave it running" bar.
 
 | Question | Decision | Where it landed |
 |---|---|---|
-| Post-transfer auth failure | The failed CLI call is not retried, later actions stop, and no state is committed. A transfer that completed before verification/rename may exist remotely; same-run cleanup is deliberately skipped because the session is gone, and a baseline-absent `pdsync-upload-<12 lowercase hex>` leftover is trashed by the next run's `cleanup staged upload` action (Proton Trash only). | §6.2, §6.4, `docs/spikes.md` S8, #21, #23 |
+| Post-transfer auth failure | The failed CLI call is not retried, later actions stop, and no state is committed. A transfer that completed before verification/rename may exist remotely; same-run cleanup is deliberately skipped because the session is gone, and a baseline-absent `pdsync-upload-<12 lowercase hex>` leftover is trashed by the next run's automatic `cleanup.staged-upload` action (Proton Trash only). A baseline-recorded leftover needs the explicit `run --cleanup-staged` opt-in. | §6.2, §6.4, `docs/spikes.md` S8, #21, #23, #38 |
 | `init --yes` defaults | Accept current defaults: cwd as local root, derived sync name, `/my-files/<name>` remote root, and the default junk/temp/log ignore set. | §3.1, #27 |
 | `ignore --json` matched path | Git-shaped, implemented in #29: `path` is the queried pathname; `matchedPath` is removed; `matchedAncestor` is emitted only when a parent-directory rule decides the result and is omitted for direct/self matches and no-match results. | §3.3 rule 7, #25, implementation #29 |
 | `init` config inside the sync root | Append the generated config's relative POSIX path to the `.pdignore` produced by `init` when the config lies under the local root. | §3.1/§3.3, #28, implementation #30 |

@@ -505,6 +505,22 @@ public sealed class CliFakeTests
     }
 
     [Fact]
+    public void Doctor_StagedLeftoverProbeAuthFailureReturnsExit3()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedFolder("sub");
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs list --json /my-files/root/sub$", "times": 1, "authExpired": true } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("doctor");
+
+        result.ExitCode.Should().Be(3, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("auth:").And.Contain("auth login");
+    }
+
+    [Fact]
     public void Doctor_NonAuthProbeFailureReturnsExit1()
     {
         using var fixture = new Fixture();
@@ -766,6 +782,146 @@ public sealed class CliFakeTests
                      })
                 fixture.IsTrashed(path).Should().BeFalse(path);
         }
+    }
+
+    [Fact]
+    public void Doctor_ReportsAdoptedStagingLeftoverButNotOrdinaryFiles()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("pdsync-upload-0123456789ab", "tracked");
+        fixture.WriteLocal("notes.txt", "ordinary user content");
+        var first = fixture.Cli("run");
+        first.ExitCode.Should().Be(0, first.Stderr);
+
+        File.Delete(fixture.LocalFull("pdsync-upload-0123456789ab"));
+        var uid = fixture.Nodes()["/my-files/root/pdsync-upload-0123456789ab"]
+            .GetProperty("uid").GetString()!;
+
+        var doctor = fixture.Cli("doctor");
+
+        doctor.ExitCode.Should().Be(0, doctor.Stderr);
+        doctor.Stdout.Should().Contain("adopted/historical");
+        doctor.Stdout.Should().Contain("pdsync-upload-0123456789ab");
+        doctor.Stdout.Should().Contain(uid);
+        doctor.Stdout.Should().NotContain("notes.txt");
+    }
+
+    [Fact]
+    public void Doctor_DoesNotReportIgnoredStagingLeftover()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("pdsync-upload-0123456789ab", "tracked");
+        fixture.WriteLocal("keep.txt", "keep the local root non-empty");
+        var first = fixture.Cli("run");
+        first.ExitCode.Should().Be(0, first.Stderr);
+
+        fixture.WriteLocal(".pdignore", "/pdsync-upload-0123456789ab\n");
+
+        var doctor = fixture.Cli("doctor");
+
+        doctor.ExitCode.Should().Be(0, doctor.Stdout + doctor.Stderr);
+        doctor.Stdout.Should().Contain("staged leftovers: none");
+        doctor.Stdout.Should().NotContain("adopted/historical");
+    }
+
+    [Fact]
+    public void Run_WithoutFlag_UsesOrdinaryRestoreForModifiedAdoptedStagingNode()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("pdsync-upload-0123456789ab", "tracked");
+        fixture.WriteLocal("keep.txt", "keep the local root non-empty");
+        var first = fixture.Cli("run");
+        first.ExitCode.Should().Be(0, first.Stderr);
+
+        File.Delete(fixture.LocalFull("pdsync-upload-0123456789ab"));
+        // A new UID/revision makes this an adopted remote-only leftover that
+        // the normal delete-vs-modify path restores instead of trashing.
+        var seed = fixture.Temp.Write("remote.json", """
+            {
+              "auth": true,
+              "nodes": [
+                { "path": "/my-files/root", "type": "folder" },
+                { "path": "/my-files/root/keep.txt", "type": "file", "content": "keep the local root non-empty" },
+                { "path": "/my-files/root/pdsync-upload-0123456789ab", "type": "file", "content": "leftover" }
+              ]
+            }
+            """);
+        fixture.Fake("__fake", "seed", seed);
+
+        var run = fixture.Cli("run");
+
+        run.ExitCode.Should().Be(0, run.Stdout + run.Stderr);
+        fixture.IsTrashed("/my-files/root/pdsync-upload-0123456789ab").Should().BeFalse();
+        File.Exists(fixture.LocalFull("pdsync-upload-0123456789ab")).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Run_WithoutFlag_TrashesUnchangedAdoptedStagingNodeAsOrdinaryLocalDelete()
+    {
+        using var fixture = new Fixture(safety: "maxDeletes: 10\n      maxDeletePercent: 100");
+        fixture.SeedRoot();
+        fixture.WriteLocal("pdsync-upload-0123456789ab", "tracked");
+        fixture.WriteLocal("keep.txt", "keep the local root non-empty");
+        var first = fixture.Cli("run");
+        first.ExitCode.Should().Be(0, first.Stderr);
+
+        File.Delete(fixture.LocalFull("pdsync-upload-0123456789ab"));
+
+        var run = fixture.Cli("run");
+
+        run.ExitCode.Should().Be(0, run.Stdout + run.Stderr);
+        fixture.IsTrashed("/my-files/root/pdsync-upload-0123456789ab").Should().BeTrue();
+    }
+
+    [Fact]
+    public void Run_WithCleanupStaged_TrashesAdoptedLeftoverAndSecondRunIsNoOp()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("pdsync-upload-0123456789ab", "tracked");
+        fixture.WriteLocal("keep.txt", "keep the local root non-empty");
+        var first = fixture.Cli("run");
+        first.ExitCode.Should().Be(0, first.Stderr);
+
+        File.Delete(fixture.LocalFull("pdsync-upload-0123456789ab"));
+        var seed = fixture.Temp.Write("remote.json", """
+            {
+              "auth": true,
+              "nodes": [
+                { "path": "/my-files/root", "type": "folder" },
+                { "path": "/my-files/root/keep.txt", "type": "file", "content": "keep the local root non-empty" },
+                { "path": "/my-files/root/pdsync-upload-0123456789ab", "type": "file", "content": "leftover" }
+              ]
+            }
+            """);
+        fixture.Fake("__fake", "seed", seed);
+
+        var run = fixture.Cli("run", "--cleanup-staged");
+
+        run.ExitCode.Should().Be(0, run.Stdout + run.Stderr);
+        fixture.IsTrashed("/my-files/root/pdsync-upload-0123456789ab").Should().BeTrue();
+        File.Exists(fixture.LocalFull("pdsync-upload-0123456789ab")).Should().BeFalse();
+
+        var second = fixture.Cli("run", "--cleanup-staged");
+        second.ExitCode.Should().Be(0, second.Stdout + second.Stderr);
+        second.Stdout.Should().Contain("planned 0");
+        fixture.IsTrashed("/my-files/root/pdsync-upload-0123456789ab").Should().BeTrue();
+    }
+
+    [Fact]
+    public void Plan_RejectsCleanupStagedFlagWithoutWritingState()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+
+        var plan = fixture.Cli("plan", "--cleanup-staged");
+
+        plan.ExitCode.Should().Be(1);
+        plan.Stderr.Should().Contain("--cleanup-staged is only valid with run");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
     }
 
     private sealed class Fixture : IDisposable

@@ -44,8 +44,9 @@ pwsh -NoProfile -File tools/live-smoke.ps1
 # Add -KeepRemote to inspect the remote tree after the run.
 ```
 
-`--fast`, `--full`, `--force`, `--json`, `--verbose`, `--interactive`,
-`--yes`, `--no-color`, `--config`, and `--sync` are recognized. `init`, `plan`,
+`--fast`, `--full`, `--force`, `--cleanup-staged` (run only), `--json`,
+`--verbose`, `--interactive`, `--yes`, `--no-color`, `--config`, and `--sync`
+are recognized. `init`, `plan`,
 `run`, `doctor`, `status`, and `ignore` are implemented; `history` and
 `rebuild` are not. `ignore` reports the deciding rule for a path and is
 read-only.
@@ -315,6 +316,9 @@ Implemented and fake-tested:
   reports every distinct exact/ancestor/descendant overlap with configured
   local roots, and treats missing, malformed, or schema-drifted files as
   non-fatal warnings (the mapping probe itself does not touch the state DB).
+- `run --cleanup-staged` opt-in cleanup for adopted/historical
+  `pdsync-upload-*` leftovers (Proton Trash only), plus a read-only `doctor`
+  candidate report for those leftovers; normal runs and `plan` stay unchanged.
 
 Live smoke: **passed** on 2026-10-31 against the real account using the script
 in §5. It covered push, pull, both deletion directions, ignore behavior, and

@@ -511,8 +511,9 @@ public sealed class Executor
     private void CleanupStagedUpload(PlanAction action)
     {
         _cli.Trash(RemoteFull(action.Path));
-        // No baseline row normally exists; deleting is harmless and keeps the
-        // state correct if an interrupted earlier run left one behind.
+        // The automatic path normally has no baseline row; the opt-in path
+        // requires one. Deleting is harmless in both cases and keeps the
+        // state correct after an interrupted earlier run.
         _state.DeleteEntry(action.PathKey);
     }
 

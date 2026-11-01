@@ -170,7 +170,10 @@ public sealed class PlanResult
     public bool CanExecute => !HasBlockingConflicts;
 }
 
-public sealed record PlanContext(DateTimeOffset Now, bool Interactive = false)
+public sealed record PlanContext(
+    DateTimeOffset Now,
+    bool Interactive = false,
+    bool CleanupStaged = false)
 {
     public static PlanContext Default => new(DateTimeOffset.UtcNow);
 }

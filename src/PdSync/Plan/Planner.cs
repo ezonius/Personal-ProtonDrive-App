@@ -139,7 +139,21 @@ public static class Planner
             {
                 actions.Add(new PlanAction(PlanActionKind.CleanupStagedUpload, r.Path, key,
                     RemoteUid: r.Uid,
-                    Reason: "leftover remote staging node from a failed upload rename or verification"));
+                    Reason: "automatic cleanup: baseline-absent leftover remote staging node from a failed upload rename or verification"));
+                continue;
+            }
+
+            // Opt-in only (run --cleanup-staged). A staging node that is already
+            // recorded in the baseline (adopted or historical) is never trashed
+            // automatically: it may have been user content. The explicit flag
+            // allows trashing a remote-only artifact that would otherwise be
+            // restored or conflict on every run.
+            if (context.CleanupStaged && b is not null && l is null && r is not null &&
+                !r.IsDirectory && StagedUpload.IsStagingLeaf(Leaf(r.Path)))
+            {
+                actions.Add(new PlanAction(PlanActionKind.CleanupStagedUpload, r.Path, key,
+                    RemoteUid: r.Uid,
+                    Reason: "opt-in cleanup: adopted/historical remote staging node left by a pre-#21 or baseline-tracked upload"));
                 continue;
             }
 

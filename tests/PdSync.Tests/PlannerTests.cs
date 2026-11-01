@@ -476,11 +476,30 @@ public sealed class PlannerTests
             .Which.Reason.Should().Be(PlanSkipReason.PolicyKeep);
     }
 
+    [Fact]
+    public void CleanupStagedFlag_OnlyAffectsAdoptedLeftover_WithDistinctReason()
+    {
+        var b = BaselineFile("pdsync-upload-0123456789ab", "a", ShaA, "uid-old", "rev-old");
+        var remote = RemoteFile("pdsync-upload-0123456789ab", "uid-new", "rev-new", "leftover", ShaOf("leftover"));
+
+        var automatic = Plan([b], Scan(), Remote(remote));
+        automatic.Actions.Should().NotContain(action =>
+            action.Kind == PlanActionKind.CleanupStagedUpload);
+
+        var optIn = Plan([b], Scan(), Remote(remote), cleanupStaged: true);
+        var cleanup = optIn.Actions.Should().ContainSingle(action =>
+            action.Kind == PlanActionKind.CleanupStagedUpload).Which;
+        cleanup.Path.Should().Be("pdsync-upload-0123456789ab");
+        cleanup.Reason.Should().Contain("opt-in cleanup");
+        cleanup.Reason.Should().NotContain("automatic cleanup");
+    }
+
     private static PlanResult Plan(
         IReadOnlyList<EntryRecord> baseEntries,
         LocalScan local,
         RemoteSnapshot remote,
-        Func<ResolvedOptions, ResolvedOptions>? configure = null)
+        Func<ResolvedOptions, ResolvedOptions>? configure = null,
+        bool cleanupStaged = false)
     {
         var options = Options();
         if (configure is not null)
@@ -495,7 +514,8 @@ public sealed class PlannerTests
             Exclude: Array.Empty<string>(),
             options);
 
-        return Planner.Plan(baseEntries, local, remote, sync, new PlanContext(Now));
+        return Planner.Plan(baseEntries, local, remote, sync,
+            new PlanContext(Now, CleanupStaged: cleanupStaged));
     }
 
     private static ResolvedOptions Options() => new(

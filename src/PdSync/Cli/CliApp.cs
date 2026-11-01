@@ -52,6 +52,12 @@ public static class CliApp
         if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init"))
             return Unknown(parsed.Command, error);
 
+        if (parsed.CleanupStaged && parsed.Command is not "run")
+        {
+            error.WriteLine("pdsync: --cleanup-staged is only valid with run");
+            return 1;
+        }
+
         if (parsed.Command == "init" &&
             (parsed.SyncNames.Count > 0 || parsed.Fast || parsed.Full))
         {
@@ -200,7 +206,7 @@ public static class CliApp
                 var attempt = SyncService.Run(
                     config, sync, args.Fast || sync.Options.Fast, args.Full,
                     args.Force, args.Interactive, args.Verbose,
-                    args.Json ? TextWriter.Null : output, error);
+                    args.Json ? TextWriter.Null : output, args.CleanupStaged, error);
 
                 if (!args.Json)
                     WriteRun(output, sync, attempt);
@@ -334,6 +340,35 @@ public static class CliApp
             {
                 failed = true;
                 checks.Add(new DoctorCheck($"sync {sync.Name} remote", false, ex.Message));
+            }
+
+            // Read-only staged-leftover probe: remote grammar-matching nodes that
+            // are already in the baseline (adopted or historical) are exactly
+            // the ones the automatic #21 path never touches. They need the
+            // explicit run --cleanup-staged opt-in; doctor only reports them.
+            try
+            {
+                using var baselineState = StateStore.OpenReadOnly(config, sync);
+                var baselineKeys = baselineState.LoadEntries(includeFrozen: true)
+                    .Select(entry => entry.PathKey)
+                    .ToHashSet(StringComparer.Ordinal);
+                var remoteIndex = RemoteIndex.Build(cli, sync.RemoteRoot);
+                var leftovers = remoteIndex.Entries
+                    .Where(entry => !entry.IsDirectory &&
+                                    baselineKeys.Contains(entry.PathKey) &&
+                                    StagedUpload.IsStagingLeaf(Leaf(entry.Path)))
+                    .Select(entry => $"{entry.Path} (uid {entry.Uid})")
+                    .ToArray();
+                checks.Add(new DoctorCheck($"sync {sync.Name} staged leftovers", true,
+                    leftovers.Length == 0
+                        ? "none"
+                        : $"{leftovers.Length} adopted/historical: {string.Join(", ", leftovers)}",
+                    Warning: leftovers.Length > 0));
+            }
+            catch (Exception ex)
+            {
+                failed = true;
+                checks.Add(new DoctorCheck($"sync {sync.Name} staged leftovers", false, ex.Message));
             }
 
             foreach (var overlap in DesktopMappingOverlapDetector.FindAll(sync.LocalRoot, mappingScan.Mappings))
@@ -649,6 +684,12 @@ public static class CliApp
             output.WriteLine($"  pruned remote dir {directory}");
     }
 
+    private static string Leaf(string relativePath)
+    {
+        var index = relativePath.LastIndexOf('/');
+        return index < 0 ? relativePath : relativePath[(index + 1)..];
+    }
+
     private static string Describe(PlanAction action) =>
         action.Kind switch
         {
@@ -721,6 +762,7 @@ public static class CliApp
               --fast              incremental remote listing
               --full              force a complete remote listing
               --force             override the deletion budget
+              --cleanup-staged    run only: also trash adopted/historical staging leftovers
               --json              machine-readable output
               --verbose           per-action output
               --yes               accept defaults; never overwrite existing files
@@ -737,6 +779,7 @@ public static class CliApp
         public bool Json { get; private set; }
         public bool Verbose { get; private set; }
         public bool Interactive { get; private set; }
+        public bool CleanupStaged { get; private set; }
         public bool Yes { get; private set; }
         public bool ShowHelp { get; private set; }
         public string? PathArgument { get; private set; }
@@ -777,6 +820,9 @@ public static class CliApp
                         break;
                     case "--force":
                         result.Force = true;
+                        break;
+                    case "--cleanup-staged":
+                        result.CleanupStaged = true;
                         break;
                     case "--verbose":
                     case "-v":

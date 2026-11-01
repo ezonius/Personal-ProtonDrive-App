@@ -72,7 +72,8 @@ public static class SyncService
         bool fullRequested,
         bool interactive = false)
     {
-        return Prepare(config, sync, readOnly: true, fastRequested, fullRequested, interactive);
+        return Prepare(config, sync, readOnly: true, fastRequested, fullRequested, interactive,
+            cleanupStaged: false);
     }
 
     public static SyncAttempt Run(
@@ -84,10 +85,12 @@ public static class SyncService
         bool interactive,
         bool verbose,
         TextWriter output,
+        bool cleanupStaged,
         TextWriter? diagnostics = null)
     {
         var diagnosticsWriter = diagnostics ?? output;
-        using var prepared = Prepare(config, sync, readOnly: false, fastRequested, fullRequested, interactive);
+        using var prepared = Prepare(config, sync, readOnly: false, fastRequested, fullRequested,
+            interactive, cleanupStaged);
 
         var pending = prepared.State.LoadPending();
         string? warning = null;
@@ -190,7 +193,8 @@ public static class SyncService
         bool readOnly,
         bool fastRequested,
         bool fullRequested,
-        bool interactive)
+        bool interactive,
+        bool cleanupStaged)
     {
         var state = readOnly
             ? StateStore.OpenReadOnly(config, sync)
@@ -218,7 +222,7 @@ public static class SyncService
                 local,
                 remote,
                 sync,
-                new PlanContext(DateTimeOffset.UtcNow, interactive));
+                new PlanContext(DateTimeOffset.UtcNow, interactive, cleanupStaged));
 
             return new PreparedSync(
                 config, sync, cli, state, baseline, local, remote, plan,

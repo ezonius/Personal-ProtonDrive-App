@@ -280,6 +280,9 @@ public sealed class Executor
             case PlanActionKind.RemoteTrash:
                 TrashRemote(action);
                 return null;
+            case PlanActionKind.CleanupStagedUpload:
+                CleanupStagedUpload(action);
+                return null;
             case PlanActionKind.DropBase:
                 return null;
             default:
@@ -322,26 +325,56 @@ public sealed class Executor
             var directory = Path.Combine(_stagingRoot, "upload", action.PathKey);
             Directory.CreateDirectory(directory);
             var stagedName = needsSafeName
-                ? "pdsync-upload-" + Guid.NewGuid().ToString("N")[..12]
+                ? StagedUpload.NewName()
                 : remoteName;
             uploadPath = Path.Combine(directory, stagedName);
             File.Copy(localFull, uploadPath, overwrite: true);
             staging = true;
         }
 
+        var uploadedLeaf = Path.GetFileName(uploadPath);
+        var renamed = false;
+        var uploadResultReceived = false;
         try
         {
             var result = _cli.Upload(uploadPath, RemoteFull(parent));
             if (result.TransferredItems == 0 && result.SkippedItems == 0)
                 throw new SyncException($"upload reported no transfer for {action.Path}");
+            uploadResultReceived = true;
 
             if (staging &&
-                !string.Equals(Path.GetFileName(uploadPath), remoteName, StringComparison.Ordinal))
-                _cli.Rename(RemoteFull(parent) + "/" + Path.GetFileName(uploadPath), remoteName);
+                !string.Equals(uploadedLeaf, remoteName, StringComparison.Ordinal))
+            {
+                _cli.Rename(RemoteFull(parent) + "/" + uploadedLeaf, remoteName);
+                renamed = true;
+            }
 
             var (node, verification) = _verifier.VerifyUpload(RemoteFull(parent), remoteName, uploadPath);
             StateSet(action.Path, EntryKind.File, StatLocal(action.Path), node: node);
             return verification;
+        }
+        catch (ProtonAuthException)
+        {
+            // The CLI session is gone, so same-run cleanup is deliberately
+            // skipped: a second CLI call cannot succeed and could stall or raise
+            // a second auth error. The next run's planner trashes the leftover.
+            throw;
+        }
+        catch
+        {
+            // Only a post-transfer failure is eligible for same-run cleanup.
+            // An upload call that threw before returning a result did not prove
+            // that any remote node exists, so it must not trigger a trash.
+            if (uploadResultReceived)
+            {
+                // Best-effort trash the just-created remote node, but never
+                // replace the original exception. A pre-existing remote file is
+                // not trashed when the upload became a new revision on it.
+                var currentLeaf = renamed ? remoteName : uploadedLeaf;
+                if (StagedUpload.IsStagingLeaf(currentLeaf) || existing is null)
+                    TryTrashUploadedNode(RemoteFull(parent), currentLeaf);
+            }
+            throw;
         }
         finally
         {
@@ -473,6 +506,31 @@ public sealed class Executor
     {
         _cli.Trash(RemoteFull(action.Path));
         _state.DeleteEntry(action.PathKey);
+    }
+
+    private void CleanupStagedUpload(PlanAction action)
+    {
+        _cli.Trash(RemoteFull(action.Path));
+        // No baseline row normally exists; deleting is harmless and keeps the
+        // state correct if an interrupted earlier run left one behind.
+        _state.DeleteEntry(action.PathKey);
+    }
+
+    private void TryTrashUploadedNode(string parentRemote, string leaf)
+    {
+        var remotePath = parentRemote.TrimEnd('/') + "/" + leaf;
+        try
+        {
+            _cli.Trash(remotePath);
+            if (_verbose)
+                _output.WriteLine($"cleanup trashed staged upload {remotePath}");
+        }
+        catch
+        {
+            // Cleanup is best effort. The original upload/rename/verification
+            // failure is rethrown by the caller; the next run's planner trashes
+            // any leftover matching staging node.
+        }
     }
 
     private void Adopt(PlanAdoption adoption)

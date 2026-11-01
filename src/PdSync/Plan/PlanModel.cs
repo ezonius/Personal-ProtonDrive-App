@@ -21,6 +21,7 @@ public enum PlanActionKind
     LocalMove,
     LocalTrash,
     RemoteTrash,
+    CleanupStagedUpload,
     DropBase,
 }
 
@@ -42,7 +43,7 @@ public sealed record PlanAction(
         PlanActionKind.RemoteMove => 4,
         PlanActionKind.LocalMove => 5,
         PlanActionKind.LocalTrash => 6,
-        PlanActionKind.RemoteTrash => 7,
+        PlanActionKind.RemoteTrash or PlanActionKind.CleanupStagedUpload => 7,
         PlanActionKind.DropBase => 9,
         _ => 9,
     };
@@ -58,12 +59,20 @@ public sealed record PlanAction(
         PlanActionKind.LocalMove => 60,
         PlanActionKind.LocalTrash => 70,
         PlanActionKind.RemoteTrash => 80,
+        PlanActionKind.CleanupStagedUpload => 85,
         PlanActionKind.DropBase => 90,
         _ => 90,
     };
 
     public bool IsUpload => Kind is PlanActionKind.UploadCreate or PlanActionKind.UploadRevision or PlanActionKind.KeepBothUpload;
     public bool IsDownload => Kind is PlanActionKind.DownloadCreate or PlanActionKind.DownloadReplace or PlanActionKind.DownloadRestore;
+
+    /// <summary>
+    /// True for user-driven deletions subject to the safety budget. Staged-upload
+    /// orphan cleanup is deliberately excluded: it is not a user deletion, does
+    /// not count in <see cref="PlanStats.Deletions"/>, and a backlog of leftovers
+    /// must never trip the budget that protects user data.
+    /// </summary>
     public bool IsDelete => Kind is PlanActionKind.LocalTrash or PlanActionKind.RemoteTrash;
 }
 

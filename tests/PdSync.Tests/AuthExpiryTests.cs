@@ -171,6 +171,37 @@ public sealed class AuthExpiryTests
         fixture.PendingCount().Should().Be(0);
     }
 
+    [Fact]
+    public void Run_AuthExpiryDuringStagedRename_SkipsSameRunCleanupAndNextRunTrashesLeftover()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("{a,b}.txt", "alpha");
+        fixture.Scenario("""{ "rules": [ { "match": "fs rename", "times": 1, "authExpired": true } ] }""");
+
+        var first = fixture.Cli("run");
+
+        first.ExitCode.Should().Be(3);
+        first.Stderr.Should().Contain("proton-drive auth login");
+        // The session is gone: same-run cleanup must deliberately skip the CLI.
+        fixture.InvocationCount("trash").Should().Be(0);
+
+        var staging = fixture.Nodes().Keys
+            .Where(k => k.StartsWith("/my-files/root/pdsync-upload-", StringComparison.Ordinal))
+            .ToList();
+        staging.Should().ContainSingle();
+        fixture.IsTrashed(staging[0]).Should().BeFalse();
+
+        // A plain rerun converges: the upload is retried and the leftover is
+        // trashed deterministically by the planner cleanup action.
+        var second = fixture.Cli("run");
+
+        second.ExitCode.Should().Be(0, second.Stderr);
+        fixture.InvocationCount("trash").Should().Be(1);
+        fixture.IsTrashed(staging[0]).Should().BeTrue();
+        File.ReadAllText(fixture.LocalFull("{a,b}.txt")).Should().Be("alpha");
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly TempDirectory _temp = new();

@@ -665,6 +665,7 @@ public static class CliApp
             PlanActionKind.LocalMove => $"move local {action.Path} -> {action.SecondaryPath}",
             PlanActionKind.LocalTrash => $"trash local {action.Path}",
             PlanActionKind.RemoteTrash => $"trash remote {action.Path}",
+            PlanActionKind.CleanupStagedUpload => $"cleanup staged upload {action.Path}",
             PlanActionKind.DropBase => $"drop state {action.Path}",
             _ => action.Kind + " " + action.Path,
         };

@@ -1,6 +1,7 @@
 using System.Globalization;
 using PdSync.Config;
 using PdSync.Proton;
+using PdSync.Remote;
 using PdSync.Scan;
 using PdSync.State;
 
@@ -126,6 +127,19 @@ public static class Planner
             {
                 skipped.Add(new PlanSkip(DisplayPath(b, l, r, key), key, PlanSkipReason.LocalSkipped,
                     "local path was skipped; it is not treated as a deletion"));
+                continue;
+            }
+
+            // A remote-only staging node with the exact staged-upload grammar is
+            // a leftover from an interrupted rename/verification. Trash it
+            // instead of inventing a local file. Baseline-tracked, adopted, and
+            // any non-matching names keep their normal plan path.
+            if (b is null && l is null && r is not null && !r.IsDirectory &&
+                StagedUpload.IsStagingLeaf(Leaf(r.Path)))
+            {
+                actions.Add(new PlanAction(PlanActionKind.CleanupStagedUpload, r.Path, key,
+                    RemoteUid: r.Uid,
+                    Reason: "leftover remote staging node from a failed upload rename or verification"));
                 continue;
             }
 
@@ -965,6 +979,12 @@ public static class Planner
 
     private static string DisplayPath(EntryRecord? b, LocalEntry? l, RemoteEntry? r, string key) =>
         l?.Path ?? r?.Path ?? b?.Path ?? key;
+
+    private static string Leaf(string relativePath)
+    {
+        var slash = relativePath.LastIndexOf('/');
+        return slash < 0 ? relativePath : relativePath[(slash + 1)..];
+    }
 
     private static bool IsUnderAny(string key, IEnumerable<string> prefixes) =>
         prefixes.Any(prefix => IsUnder(key, prefix));

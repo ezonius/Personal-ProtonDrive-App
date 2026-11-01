@@ -392,6 +392,33 @@ public sealed class InitCommandTests : IDisposable
     }
 
     [Fact]
+    public void Windows_FileWhereConfigDirectoryIsExpected_FailsWithoutPartialFiles()
+    {
+        if (!OperatingSystem.IsWindows())
+            return; // The casing walk only runs on Windows.
+
+        var local = _temp.Combine("fresh");
+        Directory.CreateDirectory(local);
+        // 'config' exists as a file, so the walk cannot resolve it as the
+        // directory component the config path requires. The old fallback would
+        // silently keep the caller's casing and fail later with a generic
+        // write error; this must surface as a config error before any write.
+        _temp.Write("fresh/config", "not a directory");
+        var configPath = Path.Combine(local, "config", "pdsync.yaml");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain("cannot resolve on-disk casing");
+        result.Stderr.Should().Contain(configPath);
+        result.Stderr.Should().Contain("is a file where a directory is required");
+        File.Exists(configPath).Should().BeFalse();
+        File.Exists(Path.Combine(local, "pdsync.yaml")).Should().BeFalse();
+        File.Exists(Path.Combine(local, ".pdignore")).Should().BeFalse();
+        Directory.GetFiles(local, ".pdignore.pdsync-init-*").Should().BeEmpty();
+    }
+
+    [Fact]
     public void ConfigOutsideLocalRoot_AddsNoConfigLine()
     {
         var local = _temp.Combine("fresh");

@@ -298,10 +298,65 @@ public static class InitCommand
         if (relative is "." or "")
             return null;
 
+        // Windows accepts a path whose directory components differ from the
+        // on-disk casing. The scanner reports the on-disk names and ignore
+        // matching is case-sensitive, so derive the rule from the real casing
+        // or the generated config could still be uploaded.
+        if (OperatingSystem.IsWindows())
+            relative = ResolveOnDiskCasing(localRoot, relative);
+
         if (Path.DirectorySeparatorChar != '/')
             relative = relative.Replace(Path.DirectorySeparatorChar, '/');
 
         return relative;
+    }
+
+    /// <summary>
+    /// Rewrites each existing component of <paramref name="relative"/> to the
+    /// name reported by the filesystem. Components that do not exist yet (the
+    /// config file itself) keep the caller's spelling; an exact-case match is
+    /// preferred so a case-sensitive Windows directory is not rewritten.
+    /// </summary>
+    private static string ResolveOnDiskCasing(string localRoot, string relative)
+    {
+        var parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var current = localRoot;
+
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var name = parts[i];
+            if (name.Length == 0 || name is "." or "..")
+            {
+                current = Path.Combine(current, name);
+                continue;
+            }
+
+            var candidate = Path.Combine(current, name);
+            if (Directory.Exists(candidate) || File.Exists(candidate))
+            {
+                try
+                {
+                    var names = new DirectoryInfo(current)
+                        .EnumerateFileSystemInfos()
+                        .Select(entry => entry.Name)
+                        .ToList();
+
+                    name = names.FirstOrDefault(n => string.Equals(n, name, StringComparison.Ordinal))
+                           ?? names.FirstOrDefault(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase))
+                           ?? name;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // Cannot enumerate this directory; keep the caller's casing.
+                    // Validation still runs against the resulting rule.
+                }
+            }
+
+            parts[i] = name;
+            current = Path.Combine(current, name);
+        }
+
+        return string.Join(Path.DirectorySeparatorChar, parts);
     }
 
     /// <summary>

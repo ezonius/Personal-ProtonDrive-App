@@ -99,7 +99,9 @@ existing `.pdignore` is never overwritten under `--yes`; interactively it is
 replaced only after an explicit yes. When the generated config lies inside the
 selected local root, the ignore content written by `init` (new or interactively
 replaced) also contains an anchored ignore rule for the config's relative POSIX
-path, so the config is not synced as ordinary content. The rule starts with `/`
+path, so the config is not synced as ordinary content. On Windows the rule uses
+the on-disk casing of existing directory components, so a `--config` path typed
+with different casing still matches the scanner's relative path. The rule starts with `/`
 so it does not match a same-named file in a subdirectory, and literal `[`, `*`,
 and `?` characters are written as bracket expressions. Before committing the
 staged ignore file, `init` loads it and requires the config path to be ignored;

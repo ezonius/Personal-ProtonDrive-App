@@ -348,6 +348,50 @@ public sealed class InitCommandTests : IDisposable
     }
 
     [Fact]
+    public void CanonicalConfigPath_ProducesTheUnchangedIgnoreText()
+    {
+        var local = _temp.Combine("fresh");
+        Directory.CreateDirectory(Path.Combine(local, "Config"));
+        var configPath = Path.Combine(local, "Config", "pdsync.yaml");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
+        File.ReadAllText(sync.IgnoreFile).Should().Be(
+            InitCommand.DefaultIgnoreText + Environment.NewLine + "/Config/pdsync.yaml" + Environment.NewLine);
+    }
+
+    [Fact]
+    public void Windows_CaseVariantConfigDirectory_UsesOnDiskCasingInIgnoreRule()
+    {
+        if (!OperatingSystem.IsWindows())
+            return; // Case-insensitive path resolution is a Windows-only behavior.
+
+        var local = _temp.Combine("fresh");
+        Directory.CreateDirectory(local);
+        Directory.CreateDirectory(Path.Combine(local, "Config"));
+        // The caller spells the existing directory with different casing.
+        var configPath = Path.Combine(local, "config", "pdsync.yaml");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        File.Exists(configPath).Should().BeTrue();
+        var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
+
+        var ignoreText = File.ReadAllText(sync.IgnoreFile);
+        ignoreText.Should().Contain("/Config/pdsync.yaml");
+        ignoreText.Should().NotContain("/config/pdsync.yaml");
+
+        var rules = IgnoreRules.Load(sync);
+        rules.IsIgnored("Config/pdsync.yaml", isDirectory: false).Should().BeTrue();
+        // Ignore matching stays case-sensitive; the scanner reports on-disk
+        // names, so this is exactly the path the rule must match.
+        rules.IsIgnored("config/pdsync.yaml", isDirectory: false).Should().BeFalse();
+    }
+
+    [Fact]
     public void ConfigOutsideLocalRoot_AddsNoConfigLine()
     {
         var local = _temp.Combine("fresh");

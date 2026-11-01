@@ -79,6 +79,22 @@ Per-run flags: `--fast` (incremental remote listing), `--full` (force a complete
 scan, overriding `--fast`), `--force` (override the deletion budget).
 `plan` accepts the same scan flags so its output matches the run it predicts.
 
+`init` creates a config and a default `.pdignore`. It resolves the config
+location with the same order as loading: `--config` or `PDSYNC_CONFIG` always
+selects the target (even when it does not exist yet); otherwise an existing
+`./pdsync.yaml`/`./pdsync.yml`/`%APPDATA%\pdsync\config.yaml` is the target and
+is refused as an overwrite; with no existing config it writes `./pdsync.yaml`.
+Prompts cover the local root (default: the current directory), the sync name
+(default: the local directory name, sanitized), and the remote root (default:
+`/my-files/<name>`). `--yes` accepts those defaults without prompting for
+scripted use. The generated YAML is serialized, reparsed through
+`ConfigLoader`, and validated by `ConfigValidator` before either file is
+written, so invalid input exits 4 and leaves no partial config. An existing
+config is never overwritten (exit 4). An existing `.pdignore` is never
+overwritten under `--yes`; interactively it is replaced only after an explicit
+yes. `init` does not open or create the state DB, take the run lock, write fast
+counters or logs, or call the Proton CLI.
+
 Exit codes:
 
 | Code | Meaning |
@@ -148,6 +164,11 @@ syncs:
       mode: sample
       samplePercent: 10
 ```
+
+`init` emits `version: 1`, the documented defaults for `direction`, `conflict`,
+`onLocalDelete`, `onRemoteDelete`, `initialSync`, and `ignoreFile: .pdignore`,
+plus one sync with the chosen local/remote roots. Every other key is left out so
+it inherits the same defaults as a hand-written config.
 
 Rules:
 

@@ -28,7 +28,8 @@ public static class CliApp
         string[] args,
         TextWriter output,
         TextWriter error,
-        IDesktopMappingDetector? desktopMappings = null)
+        IDesktopMappingDetector? desktopMappings = null,
+        TextReader? input = null)
     {
         CliArguments parsed;
         try
@@ -47,11 +48,17 @@ public static class CliApp
             return parsed.ShowHelp ? 0 : 1;
         }
 
-        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore"))
+        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init"))
             return Unknown(parsed.Command, error);
 
         try
         {
+            if (parsed.Command == "init")
+            {
+                return InitCommand.Execute(
+                    parsed.ConfigPath, parsed.Yes, parsed.Json, input ?? Console.In, output, error);
+            }
+
             var config = ConfigLoader.Load(parsed.ConfigPath);
             return parsed.Command switch
             {
@@ -652,6 +659,7 @@ public static class CliApp
             pdsync <command> [options]
 
             Commands:
+              init                create a config and a default .pdignore
               plan [sync...]      show actions; never writes
               run  [sync...]      apply actions and commit state
               doctor              check CLI, auth, roots, state
@@ -667,7 +675,7 @@ public static class CliApp
               --force             override the deletion budget
               --json              machine-readable output
               --verbose           per-action output
-              --yes               non-interactive (default)
+              --yes               accept defaults; never overwrite existing files
             """);
     }
 
@@ -681,6 +689,7 @@ public static class CliApp
         public bool Json { get; private set; }
         public bool Verbose { get; private set; }
         public bool Interactive { get; private set; }
+        public bool Yes { get; private set; }
         public bool ShowHelp { get; private set; }
         public string? PathArgument { get; private set; }
         public List<string> SyncNames { get; } = new();
@@ -726,6 +735,7 @@ public static class CliApp
                         result.Verbose = true;
                         break;
                     case "--yes":
+                        result.Yes = true;
                         break;
                     case "--interactive":
                         result.Interactive = true;

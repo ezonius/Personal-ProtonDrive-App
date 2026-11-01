@@ -258,6 +258,130 @@ public sealed class CliFakeTests
     }
 
     [Fact]
+    public void Run_WritesJsonlRunLog()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        var logFiles = RunLogFiles(fixture.StateDir);
+        logFiles.Should().ContainSingle();
+        var events = ReadRunLog(logFiles.Single());
+        events.Select(e => e.GetProperty("event").GetString()).Should().Contain(
+            new[] { "run_start", "action", "verification", "run_finish" });
+
+        var start = events.Single(e => e.GetProperty("event").GetString() == "run_start");
+        start.GetProperty("sync").GetString().Should().Be("docs");
+        start.GetProperty("runId").GetInt64().Should().BePositive();
+
+        var action = events.Single(e =>
+            e.GetProperty("event").GetString() == "action" &&
+            e.GetProperty("path").GetString() == "a.txt");
+        action.GetProperty("kind").GetString().Should().Be("UploadCreate");
+        action.GetProperty("outcome").GetString().Should().Be("ok");
+        action.GetProperty("error").ValueKind.Should().Be(JsonValueKind.Null);
+        action.GetProperty("durationMs").GetInt64().Should().BeGreaterThanOrEqualTo(0);
+
+        var verification = events.Single(e => e.GetProperty("event").GetString() == "verification");
+        verification.GetProperty("result").GetString().Should().Be("ok");
+        verification.GetProperty("method").GetString().Should().Be("size+sha1");
+
+        var finish = events.Single(e => e.GetProperty("event").GetString() == "run_finish");
+        finish.GetProperty("status").GetString().Should().Be("ok");
+        finish.GetProperty("succeeded").GetInt32().Should().Be(1);
+        finish.GetProperty("failed").GetInt32().Should().Be(0);
+        finish.GetProperty("durationMs").GetInt64().Should().BeGreaterThanOrEqualTo(0);
+    }
+
+    [Fact]
+    public void Plan_DoesNotCreateRunLogs()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        var logsBefore = RunLogFiles(fixture.StateDir).Length;
+
+        fixture.WriteLocal("b.txt", "beta");
+        var result = fixture.Cli("plan");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        RunLogFiles(fixture.StateDir).Should().HaveCount(logsBefore);
+    }
+
+    [Fact]
+    public void Run_LogsPartialFailure()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("b.txt", "beta");
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs upload", "times": 1, "exitCode": 1, "stderr": "injected failure" } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(1);
+        var logFiles = RunLogFiles(fixture.StateDir);
+        logFiles.Should().ContainSingle();
+        var events = ReadRunLog(logFiles.Single());
+        var failed = events.Single(e =>
+            e.GetProperty("event").GetString() == "action" &&
+            e.GetProperty("outcome").GetString() == "failed");
+        failed.GetProperty("error").GetString().Should().Contain("injected failure");
+
+        var finish = events.Single(e => e.GetProperty("event").GetString() == "run_finish");
+        finish.GetProperty("status").GetString().Should().Be("partial");
+        finish.GetProperty("succeeded").GetInt32().Should().Be(1);
+        finish.GetProperty("failed").GetInt32().Should().Be(1);
+    }
+
+    [Fact]
+    public void Run_LogsFailedRun()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs upload", "times": 1, "authExpired": true } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(3);
+        var logFiles = RunLogFiles(fixture.StateDir);
+        logFiles.Should().ContainSingle();
+        var events = ReadRunLog(logFiles.Single());
+        var finish = events.Single(e => e.GetProperty("event").GetString() == "run_finish");
+        finish.GetProperty("status").GetString().Should().Be("failed");
+        finish.GetProperty("error").GetString().Should().Contain("not authenticated");
+    }
+
+    private static string[] RunLogFiles(string stateDir)
+    {
+        var logDir = Path.Combine(stateDir, "logs");
+        return Directory.Exists(logDir)
+            ? Directory.GetFiles(logDir, "*.jsonl", SearchOption.AllDirectories)
+            : Array.Empty<string>();
+    }
+
+    private static List<JsonElement> ReadRunLog(string path) =>
+        File.ReadAllLines(path)
+            .Where(line => !string.IsNullOrWhiteSpace(line))
+            .Select(line =>
+            {
+                using var document = JsonDocument.Parse(line);
+                return document.RootElement.Clone();
+            })
+            .ToList();
+
+    [Fact]
     public void Doctor_ReportsHealthyFake()
     {
         using var fixture = new Fixture();

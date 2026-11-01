@@ -664,6 +664,36 @@ automatically, and a later `pdsync trash purge` (M5) will be explicit and
 interactive. Remote trash is Proton Trash; `doctor` notes that Proton's own
 retention policy applies there and may eventually remove the recoverable copy.
 
+### 7.1 Run logs (NFR-10)
+
+Every executing `run` writes one JSONL file:
+
+```
+<logDir>/<sync-name>/<runId:D8>-<yyyyMMddTHHmmssfffZ>.jsonl
+```
+
+The timestamp suffix keeps files distinct if the state DB is rebuilt and run ids
+restart. Each line is a self-contained JSON object with `schemaVersion: 1` and
+an `event` field:
+
+| Event | Fields |
+|---|---|
+| `run_start` | `sync`, `syncId`, `runId`, `startedAt`, `fast`, `runsSinceFull`, `planned` (the planner stats object) |
+| `action` | `sync`, `runId`, `kind`, `path`, `pathKey`, `secondaryPath`, `outcome` (`ok`/`failed`/`skipped`), `durationMs`, `error` |
+| `verification` | `sync`, `runId`, `kind`, `path`, `method` (`size`, `size+sha1`, optionally `+download-back`), `result` (`ok`/`failed`), `downloadBack`, `detail` |
+| `run_finish` | `sync`, `runId`, `status` (`ok`/`conflict`/`partial`/`failed`), `finishedAt`, `durationMs`, `succeeded`, `failed`, `prunedRemoteDirectories`, `error` |
+
+`kind` is the `PlanActionKind` name (PascalCase, matching `plan --json`) or
+`Adopt` for state adoptions. A verification event follows the action that
+verified it; a failed verification is also reflected in the action's `error`.
+The `runs.stats_json` column records the same counts plus `logFile`.
+
+`plan` never creates a log file or the log directory. Log writing is
+best-effort: if `logDir` is not writable, the run prints a warning and proceeds.
+Logs are retained indefinitely in v1; there is no automatic pruning, rotation,
+or size cap. Operators manage retention themselves, and a future `history`
+command will read these files.
+
 ---
 
 ## 8. Safety rules
@@ -719,7 +749,7 @@ Non-negotiable, enforced before any destructive action:
 | NFR-7 | Secrets never appear in config or logs; auth remains entirely inside the CLI. |
 | NFR-8 | Exit codes and `--json` are stable contract; human output may change. |
 | NFR-9 | CLI version is checked at startup; unsupported versions fail with a clear message. |
-| NFR-10 | Runs emit a machine-readable action log (JSONL) and a human summary with counts and durations. |
+| NFR-10 | Runs emit a machine-readable action log (JSONL, §7.1) under `logDir` and a human summary with counts and durations; `plan` emits neither. |
 | NFR-11 | Case is never synced: a local case-only rename produces no remote action, and no run creates a second remote entry differing only by case. |
 | NFR-14 | Case-fold collisions abort the affected sync before any write; both colliding paths appear in the report. |
 | NFR-15 | Upload verification uses one parent listing per folder, not one `fs info` per file. |
@@ -762,6 +792,7 @@ src/PdSync/
   Exec/
     SyncService.cs              # prepare snapshots + plan/run orchestration
     Executor.cs                 # phase ordering, action application, pending journal
+    RunLogger.cs                # NFR-10 JSONL run/action/verification log
     Verifier.cs                 # upload/download size + SHA-1 checks
     SafetyGuard.cs              # deletion budget + empty-tree guard
     LocalTrashStore.cs          # trash moves + manifests

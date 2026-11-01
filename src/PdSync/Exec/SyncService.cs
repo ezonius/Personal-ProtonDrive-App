@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using PdSync.Config;
 using PdSync.Plan;
@@ -104,6 +105,10 @@ public static class SyncService
             return new SyncAttempt(prepared.Plan, null, prepared.UsedFastListing, prepared.RunsSinceFull, warning);
 
         var runId = prepared.State.StartRun();
+        var runStopwatch = Stopwatch.StartNew();
+        using var log = RunLogger.Create(
+            config, sync, runId, prepared.Plan.Stats, prepared.UsedFastListing,
+            prepared.RunsSinceFull, output);
         try
         {
             var executor = new Executor(
@@ -117,7 +122,8 @@ public static class SyncService
                 prepared.Plan,
                 runId,
                 output,
-                verbose);
+                verbose,
+                log);
 
             var report = executor.Execute();
             var status = report.Failed == 0
@@ -129,13 +135,17 @@ public static class SyncService
                 succeeded = report.Succeeded,
                 failed = report.Failed,
                 prunedRemoteDirectories = report.PrunedRemoteDirectories,
+                logFile = log.Path,
             }));
+            runStopwatch.Stop();
+            log.RunFinish(status, runStopwatch.ElapsedMilliseconds,
+                report.Succeeded, report.Failed, report.PrunedRemoteDirectories.Count);
 
             if (fastRequested)
                 FastScanTracker.RecordRun(config, sync, fullScan: !prepared.UsedFastListing);
             return new SyncAttempt(prepared.Plan, report, prepared.UsedFastListing, prepared.RunsSinceFull, warning);
         }
-        catch
+        catch (Exception ex)
         {
             try
             {
@@ -145,6 +155,9 @@ public static class SyncService
             {
                 // Preserve the original exception.
             }
+
+            runStopwatch.Stop();
+            log.RunFinish("failed", runStopwatch.ElapsedMilliseconds, 0, 0, 0, ex.Message);
             throw;
         }
     }

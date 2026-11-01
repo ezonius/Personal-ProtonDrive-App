@@ -79,6 +79,7 @@ src/PdSync/
   Exec/
     SyncService.cs           shared prepare for plan/run; run orchestration
     Executor.cs              applies actions, pending journal, state commit
+    RunLogger.cs             JSONL run/action/verification log (NFR-10)
     Verifier.cs              size/SHA-1 upload verify; sample/full download-back
     SafetyGuard.cs           empty-tree guard + deletion budget
     LocalTrashStore.cs       local trash moves + per-run manifest
@@ -185,7 +186,7 @@ parallelism is otherwise disabled in the assembly/test setup.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 
 Prefer behavior assertions over implementation details. The current suite is
-**168 tests**.
+**181 tests**.
 
 ---
 
@@ -276,8 +277,8 @@ Known gaps / likely next work:
 - Transient retry/backoff is implemented in `ProtonCli`
   (`ProtonRetryOptions`); FakeProtonCli scenario tests cover 429/5xx,
   exhaustion, permanent failures, auth, and timeout recovery.
-- `logDir` is configured but structured run/action JSONL logging is not yet
-  wired.
+- `logDir` JSONL run/action/verification logging is implemented; `history`
+  does not read it yet.
 - `init`, `ignore`, `history`, and `rebuild` are not implemented.
 - Interactive conflict prompting is not implemented; `ask` currently uses the
   non-interactive fallback.

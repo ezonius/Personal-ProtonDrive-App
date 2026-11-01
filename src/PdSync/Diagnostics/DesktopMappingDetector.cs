@@ -76,7 +76,7 @@ public sealed class DesktopMappingDetector : IDesktopMappingDetector
 
             found = true;
             if (TryRead(path, out var mappings, out var error))
-                return new DesktopMappingScan(mappings, null);
+                return new DesktopMappingScan(mappings, error);
 
             diagnostic = error;
         }
@@ -103,6 +103,7 @@ public sealed class DesktopMappingDetector : IDesktopMappingDetector
                 return false;
             }
 
+            var entries = list.GetArrayLength();
             foreach (var item in list.EnumerateArray())
             {
                 if (item.ValueKind != JsonValueKind.Object ||
@@ -119,7 +120,16 @@ public sealed class DesktopMappingDetector : IDesktopMappingDetector
                 mappings.Add(new DesktopMapping(value, path));
             }
 
-            diagnostic = null;
+            var skipped = entries - mappings.Count;
+            if (entries > 0 && mappings.Count == 0)
+            {
+                diagnostic = $"Mappings array has {entries} entries but none contained a usable Local.RootFolderPath: {path}";
+                return false;
+            }
+
+            diagnostic = skipped > 0
+                ? $"{skipped} of {entries} Mappings entries were skipped (missing or non-absolute Local.RootFolderPath): {path}"
+                : null;
             return true;
         }
         catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException or ArgumentException)
@@ -154,17 +164,33 @@ public sealed record DesktopMappingOverlap(DesktopMapping Mapping, DesktopMappin
 /// </summary>
 public static class DesktopMappingOverlapDetector
 {
-    public static DesktopMappingOverlap? Find(string localRoot, IEnumerable<DesktopMapping> mappings)
+    /// <summary>
+    /// Returns every overlapping mapping, de-duplicated by mapping identity, so
+    /// duplicate mappings do not produce duplicate doctor checks.
+    /// </summary>
+    public static IReadOnlyList<DesktopMappingOverlap> FindAll(
+        string localRoot,
+        IEnumerable<DesktopMapping> mappings)
     {
+        var overlaps = new List<DesktopMappingOverlap>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+
         foreach (var mapping in mappings)
         {
             var kind = Classify(localRoot, mapping.LocalRoot);
-            if (kind != DesktopMappingOverlapKind.None)
-                return new DesktopMappingOverlap(mapping, kind);
+            if (kind == DesktopMappingOverlapKind.None)
+                continue;
+
+            var key = TryIdentityKey(mapping.LocalRoot) ?? mapping.LocalRoot;
+            if (seen.Add(key))
+                overlaps.Add(new DesktopMappingOverlap(mapping, kind));
         }
 
-        return null;
+        return overlaps;
     }
+
+    public static DesktopMappingOverlap? Find(string localRoot, IEnumerable<DesktopMapping> mappings) =>
+        FindAll(localRoot, mappings).FirstOrDefault();
 
     public static DesktopMappingOverlapKind Classify(string localRoot, string mappingRoot)
     {
@@ -190,6 +216,11 @@ public static class DesktopMappingOverlapDetector
         try
         {
             var full = PathUtil.TrimEnd(Path.GetFullPath(path)).Replace('\\', '/');
+            // Drop a trailing separator so a UNC share root (\\server\share\)
+            // compares equal to the same root without one. Preserve drive roots
+            // such as c:/ so IsUnder can still use the trailing separator.
+            if (full.Length > 3 && full.EndsWith('/'))
+                full = full.TrimEnd('/');
             return PathKey.Fold(full);
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException or IOException)

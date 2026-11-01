@@ -632,16 +632,29 @@ mapping's `Local.RootFolderPath` with every configured sync `local` root.
 
 - Windows probes `%LOCALAPPDATA%\Proton\Proton Drive\Mappings.json`, then the
   equivalent `%APPDATA%` and `%PROGRAMDATA%` locations and two older layouts.
-  Other platforms are a no-op because the app does not publish this file there.
+  The macOS desktop client exists but its mapping-file path and schema have not
+  been verified, so non-Windows detection is a documented best-effort no-op
+  rather than a guessed probe.
 - Parsing is defensive: a missing file means "no mappings"; malformed JSON, an
   unreadable file, or an unrecognized shape yields no mappings plus a non-fatal
-  `warn` diagnostic. `doctor` never crashes and never writes anything.
+  `warn` diagnostic. An array whose entries all lack a usable
+  `Local.RootFolderPath` is schema drift, not "no mappings": it is reported as a
+  warning. Entries that are individually skipped produce a partial-schema
+  warning while the usable mappings are still checked. The probe itself never
+  crashes and only reads files.
+- `doctor` as a whole is not write-free: its existing state-DB check may still
+  open or migrate an existing database exactly as before (§7). The mapping probe
+  does not touch the state DB.
 - Overlap is classified with pdsync's identity rules (NFC + case-folded,
   segment-aware): exact, local root inside a mapping, or mapping inside a local
-  root. Sibling names sharing a string prefix do not overlap.
-- An overlap is a doctor problem (exit 1) reported as
-  `sync <name> desktop-app overlap` with the mapping path. JSON output also
-  carries a `desktopMappings` array of detected mapping roots.
+  root. Sibling names sharing a string prefix do not overlap. Symlink, junction,
+  and 8.3 short-name aliases are not resolved, so an aliased path can be a false
+  negative.
+- Every distinct overlapping mapping is a doctor problem (exit 1) reported as
+  `sync <name> desktop-app overlap` with the mapping path; duplicate mappings
+  are de-duplicated by identity. JSON output also carries a `desktopMappings`
+  array of detected mapping roots. The additive per-check `warning` field is
+  emitted only when true.
 
 ---
 

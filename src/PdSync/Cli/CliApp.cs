@@ -233,11 +233,12 @@ public static class CliApp
         var failed = false;
 
         var mappingScan = desktopMappings.Detect();
-        var mappingDetail = mappingScan.Diagnostic is not null
-            ? mappingScan.Diagnostic
-            : mappingScan.Mappings.Count == 0
-                ? "no desktop-app mappings detected"
-                : $"{mappingScan.Mappings.Count} mapping(s): {string.Join(", ", mappingScan.Mappings.Select(mapping => mapping.LocalRoot))}";
+        var mappingSummary = mappingScan.Mappings.Count == 0
+            ? "no desktop-app mappings detected"
+            : $"{mappingScan.Mappings.Count} mapping(s): {string.Join(", ", mappingScan.Mappings.Select(mapping => mapping.LocalRoot))}";
+        var mappingDetail = mappingScan.Diagnostic is null
+            ? mappingSummary
+            : $"{mappingSummary}; warning: {mappingScan.Diagnostic}";
         checks.Add(new DoctorCheck("desktop-app mappings", mappingScan.Diagnostic is null, mappingDetail,
             Warning: mappingScan.Diagnostic is not null));
 
@@ -300,8 +301,7 @@ public static class CliApp
                 checks.Add(new DoctorCheck($"sync {sync.Name} remote", false, ex.Message));
             }
 
-            var overlap = DesktopMappingOverlapDetector.Find(sync.LocalRoot, mappingScan.Mappings);
-            if (overlap is not null)
+            foreach (var overlap in DesktopMappingOverlapDetector.FindAll(sync.LocalRoot, mappingScan.Mappings))
             {
                 failed = true;
                 checks.Add(new DoctorCheck($"sync {sync.Name} desktop-app overlap", false,
@@ -473,7 +473,11 @@ public static class CliApp
             _ => action.Kind + " " + action.Path,
         };
 
-    private sealed record DoctorCheck(string Name, bool Ok, string Detail, bool Warning = false);
+    private sealed record DoctorCheck(
+        string Name,
+        bool Ok,
+        string Detail,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] bool Warning = false);
 
     private static string DescribeOverlap(DesktopMappingOverlapKind kind) => kind switch
     {

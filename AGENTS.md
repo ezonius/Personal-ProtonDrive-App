@@ -188,7 +188,7 @@ parallelism is otherwise disabled in the assembly/test setup.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 
 Prefer behavior assertions over implementation details. The current suite is
-**197 tests**.
+**203 tests**.
 
 ---
 
@@ -269,8 +269,9 @@ Implemented and fake-tested:
   journal, local trash, Proton Trash, pruning, safety budgets, lock.
 - Fast/full mode and tracker.
 - `doctor` desktop-app mapping detection: reads `Mappings.json` best-effort,
-  reports exact/ancestor/descendant overlap with configured local roots, and
-  treats missing or malformed files as non-fatal (no state DB access).
+  reports every distinct exact/ancestor/descendant overlap with configured
+  local roots, and treats missing, malformed, or schema-drifted files as
+  non-fatal warnings (the mapping probe itself does not touch the state DB).
 
 Live smoke: **passed** on 2026-10-31 against the real account using the script
 in §5. It covered push, pull, both deletion directions, ignore behavior, and

@@ -445,6 +445,7 @@ public sealed class CliFakeTests
 
         result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
         result.Stdout.Should().Contain("\"ok\": true");
+        result.Stdout.Should().NotContain("\"warning\"");
     }
 
     [Fact]
@@ -456,8 +457,11 @@ public sealed class CliFakeTests
         var result = fixture.CliWithMappings(StubDesktopMappings.WithMappings(fixture.Local), "doctor");
 
         result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
-        result.Stdout.Should().Contain("sync docs desktop-app overlap");
-        result.Stdout.Should().Contain(fixture.Local);
+        var overlapLine = result.Stdout
+            .Split('\n')
+            .Select(line => line.TrimEnd('\r'))
+            .Single(line => line.StartsWith("FAIL sync docs desktop-app overlap:", StringComparison.Ordinal));
+        overlapLine.Should().Contain(fixture.Local).And.Contain("exact overlap");
         result.Stdout.Should().Contain("doctor: problems found");
     }
 
@@ -470,9 +474,16 @@ public sealed class CliFakeTests
         var result = fixture.CliWithMappings(StubDesktopMappings.WithMappings(fixture.Local), "doctor", "--json");
 
         result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
-        result.Stdout.Should().Contain("\"desktopMappings\"");
-        result.Stdout.Should().Contain(fixture.Local.Replace("\\", "\\\\"));
-        result.Stdout.Should().Contain("sync docs desktop-app overlap");
+        using var document = JsonDocument.Parse(result.Stdout);
+        var root = document.RootElement;
+        root.GetProperty("desktopMappings")[0].GetString().Should().Be(fixture.Local);
+
+        var detail = root.GetProperty("checks")
+            .EnumerateArray()
+            .Single(check => check.GetProperty("name").GetString() == "sync docs desktop-app overlap")
+            .GetProperty("detail")
+            .GetString();
+        detail.Should().Contain(fixture.Local).And.Contain("exact overlap");
     }
 
     [Fact]

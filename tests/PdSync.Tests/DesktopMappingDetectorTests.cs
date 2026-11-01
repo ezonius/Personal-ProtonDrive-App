@@ -45,7 +45,30 @@ public sealed class DesktopMappingDetectorTests
     }
 
     [Fact]
-    public void Detect_ReadsLocalRootFolderPath_AndSkipsInvalidEntries()
+    public void Detect_AllEntriesInvalid_ReportsSchemaDriftInsteadOfNoMappings()
+    {
+        using var temp = new TempDirectory();
+        var path = temp.Write("Mappings.json", """
+            {
+              "Mappings": [
+                { "Local": {} },
+                { "Local": { "RootFolderPath": "relative/path" } },
+                { "Remote": {} }
+              ]
+            }
+            """);
+        var detector = new DesktopMappingDetector(new[] { path });
+
+        var scan = detector.Detect();
+
+        scan.Mappings.Should().BeEmpty();
+        scan.Diagnostic.Should().NotBeNull();
+        scan.Diagnostic.Should().Contain("3 entries");
+        scan.Diagnostic.Should().Contain(path);
+    }
+
+    [Fact]
+    public void Detect_PartiallyInvalidEntries_ReportsWarningAndKeepsMappings()
     {
         using var temp = new TempDirectory();
         var mapped = temp.Combine("mapped");
@@ -53,9 +76,28 @@ public sealed class DesktopMappingDetectorTests
             {
               "Mappings": [
                 { "Local": { "RootFolderPath": "{{mapped.Replace("\\", "\\\\")}}" } },
-                { "Local": { "RootFolderPath": "relative/path" } },
-                { "Local": {} },
-                { "Remote": {} }
+                { "Local": {} }
+              ]
+            }
+            """);
+        var detector = new DesktopMappingDetector(new[] { path });
+
+        var scan = detector.Detect();
+
+        scan.Mappings.Should().ContainSingle().Which.LocalRoot.Should().Be(mapped);
+        scan.Diagnostic.Should().NotBeNull();
+        scan.Diagnostic.Should().Contain("1 of 2");
+    }
+
+    [Fact]
+    public void Detect_ReadsLocalRootFolderPath_AndSkipsInvalidEntries()
+    {
+        using var temp = new TempDirectory();
+        var mapped = temp.Combine("mapped");
+        var path = temp.Write("Mappings.json", $$"""
+            {
+              "Mappings": [
+                { "Local": { "RootFolderPath": "{{mapped.Replace("\\", "\\\\")}}" } }
               ]
             }
             """);
@@ -119,6 +161,65 @@ public sealed class DesktopMappingDetectorTests
 
         DesktopMappingOverlapDetector.Classify(composed, decomposed)
             .Should().Be(DesktopMappingOverlapKind.Exact);
+    }
+
+    [Fact]
+    public void Classify_TrailingSeparationDoesNotChangeIdentity()
+    {
+        using var temp = new TempDirectory();
+        var root = temp.Combine("cloud");
+
+        DesktopMappingOverlapDetector.Classify(root, root + Path.DirectorySeparatorChar)
+            .Should().Be(DesktopMappingOverlapKind.Exact);
+    }
+
+    [Fact]
+    public void Classify_FilesystemRootIsHandled()
+    {
+        using var temp = new TempDirectory();
+        var root = Path.GetPathRoot(temp.Root)!;
+        var child = Path.Combine(root, "pdsync-overlap-child");
+
+        DesktopMappingOverlapDetector.Classify(root, root)
+            .Should().Be(DesktopMappingOverlapKind.Exact);
+        DesktopMappingOverlapDetector.Classify(child, root)
+            .Should().Be(DesktopMappingOverlapKind.LocalRootInsideMapping);
+        DesktopMappingOverlapDetector.Classify(root, child)
+            .Should().Be(DesktopMappingOverlapKind.MappingInsideLocalRoot);
+    }
+
+    [Fact]
+    public void Classify_UncShareRootTrailingSeparatorIsExact()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        DesktopMappingOverlapDetector.Classify(@"\\server\share", @"\\server\share\")
+            .Should().Be(DesktopMappingOverlapKind.Exact);
+        DesktopMappingOverlapDetector.Classify(@"\\server\share\folder", @"\\server\share")
+            .Should().Be(DesktopMappingOverlapKind.LocalRootInsideMapping);
+    }
+
+    [Fact]
+    public void FindAll_ReturnsEveryDistinctOverlappingMapping()
+    {
+        using var temp = new TempDirectory();
+        var local = temp.Combine("cloud");
+        var mappings = new[]
+        {
+            new DesktopMapping(Path.Combine(local, "a"), "m.json"),
+            new DesktopMapping(Path.Combine(local, "a"), "m.json"),
+            new DesktopMapping(Path.Combine(local, "b"), "m.json"),
+            new DesktopMapping(temp.Combine("unrelated"), "m.json"),
+        };
+
+        var overlaps = DesktopMappingOverlapDetector.FindAll(local, mappings);
+
+        overlaps.Should().HaveCount(2);
+        overlaps.Select(overlap => overlap.Mapping.LocalRoot)
+            .Should().BeEquivalentTo(new[] { Path.Combine(local, "a"), Path.Combine(local, "b") });
+        overlaps.Should().OnlyContain(overlap =>
+            overlap.Kind == DesktopMappingOverlapKind.MappingInsideLocalRoot);
     }
 
     [Fact]

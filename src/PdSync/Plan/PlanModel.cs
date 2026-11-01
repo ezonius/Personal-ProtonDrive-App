@@ -21,6 +21,7 @@ public enum PlanActionKind
     LocalMove,
     LocalTrash,
     RemoteTrash,
+    CleanupStagedUpload,
     DropBase,
 }
 
@@ -42,7 +43,7 @@ public sealed record PlanAction(
         PlanActionKind.RemoteMove => 4,
         PlanActionKind.LocalMove => 5,
         PlanActionKind.LocalTrash => 6,
-        PlanActionKind.RemoteTrash => 7,
+        PlanActionKind.RemoteTrash or PlanActionKind.CleanupStagedUpload => 7,
         PlanActionKind.DropBase => 9,
         _ => 9,
     };
@@ -58,6 +59,7 @@ public sealed record PlanAction(
         PlanActionKind.LocalMove => 60,
         PlanActionKind.LocalTrash => 70,
         PlanActionKind.RemoteTrash => 80,
+        PlanActionKind.CleanupStagedUpload => 85,
         PlanActionKind.DropBase => 90,
         _ => 90,
     };

@@ -500,6 +500,127 @@ public sealed class CliFakeTests
         result.Stdout.Should().Contain("bad json");
     }
 
+    [Fact]
+    public void Run_StagedUploadRenameFailure_TrashesStagedNodeAndReturnsOriginalFailure()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("{a,b}.txt", "alpha");
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs rename", "times": 1, "exitCode": 1, "stderr": "injected rename failure" } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(1);
+        result.Stdout.Should().Contain("injected rename failure");
+        fixture.RemoteFiles().Should().BeEmpty();
+        var staging = fixture.Nodes().Keys
+            .Where(k => k.StartsWith("/my-files/root/pdsync-upload-", StringComparison.Ordinal))
+            .ToList();
+        staging.Should().ContainSingle();
+        fixture.IsTrashed(staging[0]).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Run_StagedUploadRenameFailure_LeavesNodeWhenCleanupAlsoFails()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("{a,b}.txt", "alpha");
+        var scenario = fixture.Temp.Write("scenario.json", """
+            {
+              "rules": [
+                { "match": "fs rename", "times": 1, "exitCode": 1, "stderr": "injected rename failure" },
+                { "match": "fs trash", "times": 0, "exitCode": 1, "stderr": "injected cleanup failure" }
+              ]
+            }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(1);
+        result.Stdout.Should().Contain("injected rename failure");
+        result.Stdout.Should().NotContain("injected cleanup failure");
+        var staging = fixture.Nodes().Keys
+            .Where(k => k.StartsWith("/my-files/root/pdsync-upload-", StringComparison.Ordinal))
+            .ToList();
+        staging.Should().ContainSingle();
+        fixture.IsTrashed(staging[0]).Should().BeFalse();
+    }
+
+    [Fact]
+    public void PlanAndRun_CleanupRemoteStagingLeftoverWithoutDownloadingIt()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedFile("pdsync-upload-0123456789ab", "orphan");
+
+        var plan = fixture.Cli("plan");
+
+        plan.ExitCode.Should().Be(0, plan.Stderr);
+        plan.Stdout.Should().Contain("cleanup staged upload pdsync-upload-0123456789ab");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+
+        var run = fixture.Cli("run");
+        run.ExitCode.Should().Be(0, run.Stderr);
+        fixture.IsTrashed("/my-files/root/pdsync-upload-0123456789ab").Should().BeTrue();
+        File.Exists(fixture.LocalFull("pdsync-upload-0123456789ab")).Should().BeFalse();
+
+        var second = fixture.Cli("run");
+        second.ExitCode.Should().Be(0, second.Stderr);
+        fixture.IsTrashed("/my-files/root/pdsync-upload-0123456789ab").Should().BeTrue();
+    }
+
+    [Fact]
+    public void Run_DoesNotTrashBaselineTrackedOrNonMatchingStagingNames()
+    {
+        using (var fixture = new Fixture())
+        {
+            fixture.SeedRoot();
+            fixture.WriteLocal("pdsync-upload-0123456789ab", "tracked");
+            var first = fixture.Cli("run");
+            first.ExitCode.Should().Be(0, first.Stderr);
+
+            var second = fixture.Cli("run");
+            second.ExitCode.Should().Be(0, second.Stderr);
+            fixture.IsTrashed("/my-files/root/pdsync-upload-0123456789ab").Should().BeFalse();
+            File.Exists(fixture.LocalFull("pdsync-upload-0123456789ab")).Should().BeTrue();
+        }
+
+        using (var fixture = new Fixture())
+        {
+            var seed = fixture.Temp.Write("seed.json", """
+                {
+                  "auth": true,
+                  "nodes": [
+                    { "path": "/my-files/root", "type": "folder" },
+                    { "path": "/my-files/root/pdsync-upload-0123456789AB", "type": "file", "content": "uppercase" },
+                    { "path": "/my-files/root/pdsync-upload-0123456789a", "type": "file", "content": "short" },
+                    { "path": "/my-files/root/pdsync-upload-0123456789ab.txt", "type": "file", "content": "extension" },
+                    { "path": "/my-files/root/pdsync-upload2-0123456789ab", "type": "file", "content": "prefix" },
+                    { "path": "/my-files/root/pdsync-upload-0123456789ag", "type": "file", "content": "nonhex" }
+                  ]
+                }
+                """);
+            fixture.Fake("__fake", "seed", seed);
+
+            var result = fixture.Cli("run");
+
+            result.ExitCode.Should().Be(0, result.Stderr);
+            foreach (var path in new[]
+                     {
+                         "/my-files/root/pdsync-upload-0123456789AB",
+                         "/my-files/root/pdsync-upload-0123456789a",
+                         "/my-files/root/pdsync-upload-0123456789ab.txt",
+                         "/my-files/root/pdsync-upload2-0123456789ab",
+                         "/my-files/root/pdsync-upload-0123456789ag",
+                     })
+                fixture.IsTrashed(path).Should().BeFalse(path);
+        }
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly TempDirectory _temp = new();

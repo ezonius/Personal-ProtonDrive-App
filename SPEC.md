@@ -554,6 +554,14 @@ Notes:
   from a staging entry named with the canonical casing (hardlink on the same
   NTFS volume, copy otherwise), then delete the staging entry. Never upload the
   local basename in that case — it would create a case-colliding remote node.
+- A glob-unsafe local name is uploaded under `pdsync-upload-<12 lowercase hex>`
+  and then renamed to the real name. If the upload result was received but the
+  rename or verification fails, the executor best-effort trashes the
+  just-created staged remote node before rethrowing the original failure. A
+  cleanup failure never masks that failure. Any remote-only leftover whose leaf
+  matches the exact staging grammar and is not in the baseline is trashed by the
+  next run as a `cleanup staged upload` action, never downloaded or treated as a
+  conflict. Both paths use Proton Trash, never permanent deletion.
 - Downloads are **always per file** into a staging directory, never a recursive
   folder download, so we control replacement and verification.
 - All calls are serialized. Parallelism is intentionally not used: the CLI shares
@@ -642,9 +650,14 @@ Retry policy (implementation in `ProtonCli`, `ProtonRetryOptions`):
   failure aborts the run: the failing CLI call is not retried, no later action
   runs, and no state is committed for the failed action. Already-committed
   actions remain. If auth expires after a transfer but before its verification
-  or staged rename, a remote revision or a `pdsync-upload-<id>` node may already
-  exist; the next run reconciles it. Recovery is `proton-drive auth login`
-  followed by a rerun, which re-plans the failed work from snapshots. S8
+  or staged rename, a remote revision or a `pdsync-upload-<12 lowercase hex>`
+  node may already exist. When the upload result was received, the executor
+  best-effort trashes the just-created staged node before rethrowing the auth
+  failure (cleanup errors never mask the original exception); if cleanup cannot
+  run, the next run's `cleanup staged upload` action trashes the matching
+  baseline-absent leftover instead of downloading it. Recovery is
+  `proton-drive auth login` followed by a rerun, which re-plans the failed work
+  from snapshots. S8
   coverage is deterministic fake-CLI (`AuthExpiryTests`,
   `Category=AuthExpiry`), not a live expiry probe.
 - Per-item `failedItems > 0` in upload/download JSON is treated as a permanent
@@ -971,8 +984,11 @@ cannot represent — that is the documented hard error.
    assert state plus `invocations.jsonl`. Smoke: `tools/FakeProtonCli/smoke.ps1`.
    S8 auth expiry is covered automatically (no live session) by
    `AuthExpiryTests`: exit 3, one attempt, no later action, and no state commit
-   for the failed action; a post-transfer failure may leave a remote revision or
-   staged node that the next run reconciles.
+   for the failed action. A post-transfer rename/verification failure
+   best-effort trashes the just-created staged node in the same run; if cleanup
+   fails, the next run's planner trashes a baseline-absent
+   `pdsync-upload-<12 lowercase hex>` leftover via a `cleanup staged upload`
+   action.
 5. **Live smoke (opt-in)** — scratch remote folder `/my-files/pdsync-test`:
    create/modify/rename/delete both sides, conflict, ignore negation/anchoring, empty
    folders, large file, unicode names; then clean up.
@@ -1061,7 +1077,7 @@ v1 ships at M4; M5 is the "leave it running" bar.
 
 | Question | Decision | Where it landed |
 |---|---|---|
-| Post-transfer auth failure | Documentation-only for now: the failed CLI call is not retried, later actions stop, and no state is committed; a transfer that completed before verification/rename may exist remotely and is reconciled next run. Revisit stronger handling after staged-upload cleanup (#21). | §6.4, `docs/spikes.md` S8, #23 |
+| Post-transfer auth failure | The failed CLI call is not retried, later actions stop, and no state is committed. A transfer that completed before verification/rename may exist remotely; a staged upload is best-effort trashed in the same run, and a baseline-absent `pdsync-upload-<12 lowercase hex>` leftover is trashed by the next run's `cleanup staged upload` action (Proton Trash only). | §6.2, §6.4, `docs/spikes.md` S8, #21, #23 |
 | `init --yes` defaults | Accept current defaults: cwd as local root, derived sync name, `/my-files/<name>` remote root, and the default junk/temp/log ignore set. | §3.1, #27 |
 | `ignore --json` matched path | Git-shaped, implemented in #29: `path` is the queried pathname; `matchedPath` is removed; `matchedAncestor` is emitted only when a parent-directory rule decides the result and is omitted for direct/self matches and no-match results. | §3.3 rule 7, #25, implementation #29 |
 | `init` config inside the sync root | Append the generated config's relative POSIX path to the `.pdignore` produced by `init` when the config lies under the local root. | §3.1/§3.3, #28, implementation #30 |

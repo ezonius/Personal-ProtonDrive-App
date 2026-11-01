@@ -576,7 +576,12 @@ Retry policy (implementation in `ProtonCli`, `ProtonRetryOptions`):
   or 5xx on these is surfaced immediately; the next run reconciles from state
   instead of risking a duplicate revision, folder, or trash operation.
 - **Auth failures are never retried** (`exit 3` stays `ProtonAuthException` and
-  exit code 3). Permanent failures are not retried either.
+  exit code 3). Permanent failures are not retried either. A mid-run auth
+  failure aborts the run, performs no action for the failed path, and commits no
+  state for it; already-committed actions remain. Recovery is
+  `proton-drive auth login` followed by a rerun, which re-plans the failed work
+  from snapshots. This is covered by deterministic fake-CLI tests
+  (`AuthExpiryTests`, `Category=AuthExpiry`) rather than a live expiry probe.
 - Per-item `failedItems > 0` in upload/download JSON is treated as a permanent
   action failure; the executor's per-file retry path handles those.
 
@@ -899,6 +904,9 @@ cannot represent — that is the documented hard error.
    and injects auth expiry, timeouts, failures, and truncated downloads. Tests
    point `proton.cli` at its apphost, set `PDSYNC_FAKE_STATE`, seed a tree, and
    assert state plus `invocations.jsonl`. Smoke: `tools/FakeProtonCli/smoke.ps1`.
+   S8 auth expiry is covered automatically (no live session) by
+   `AuthExpiryTests`: exit 3, one attempt, no failed/later action, and no state
+   commit for the failed action.
 5. **Live smoke (opt-in)** — scratch remote folder `/my-files/pdsync-test`:
    create/modify/rename/delete both sides, conflict, ignore negation/anchoring, empty
    folders, large file, unicode names; then clean up.
@@ -938,9 +946,10 @@ cannot represent — that is the documented hard error.
 | S14 | How does the CLI treat local paths containing `[`, `]`, `{`, `}`, `*`, `?`? Does upload `--json` return per-file data? | Local-path glob escaping (§6.2.1) and verification strategy (§6.5). |
 | S15 | Can `fs restore /trash/<uid>` disambiguate same-named trashed nodes? | Deterministic undo for deletions (§6.2). Open; verify in M1. |
 
-**Results (2026-10-31):** `docs/spikes.md`. S1–S7 and S9–S14 answered; S8
-deferred (deliberately expiring the login would break the rest of the suite); S15
-open. Headline corrections to the design: plaintext SHA-1 **is** available,
+**Results (2026-10-31):** `docs/spikes.md`. S1–S7 and S9–S14 answered; S15
+open. S8's live probe is deferred (deliberately expiring the login would break
+the rest of the suite), but pdsync's exit-3/abort/no-retry/no-commit contract is
+covered by deterministic fake-CLI tests (`AuthExpiryTests`); see docs §7. Headline corrections to the design: plaintext SHA-1 **is** available,
 folder mtime does **not** propagate, local paths are glob-expanded, and each CLI
 call costs ~2–4 s.
 
@@ -950,7 +959,7 @@ call costs ~2–4 s.
 
 | M | Scope | Exit criteria |
 |---|---|---|
-| M0 | Spikes S1–S14 | **Done 2026-10-31**: `docs/spikes.md`; S8 deferred, no blocking unknowns |
+| M0 | Spikes S1–S14 | **Done 2026-10-31**: `docs/spikes.md`; S8 live probe deferred but fake-CLI auth-expiry coverage added, no blocking unknowns |
 | M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, pure planner + remote index **(done)**, FakeProtonCli planner tests **(done)**, `doctor`, `plan` CLI **(done, live-smoked)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
 | M2 | Push path: create dirs, upload creates/revisions, verify, state commit **(done, live-smoked)** | Push-only sync converges; second run is a no-op |
 | M3 | Pull path: staged download, local trash, remote index **(done)**, executor **(done, live-smoked)** | Pull converges; interrupted download never corrupts a local file |

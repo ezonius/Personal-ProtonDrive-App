@@ -18,7 +18,7 @@ Raw output: `docs/spikes-results.json` / `docs/spikes-results.md` (regenerated, 
 | S5 | CLI call latency | `list` 1.7–3.5 s, `info` 1.8–4.2 s, small upload 3.9–4.0 s, small download 4.4–6.6 s. |
 | S6 | Download conflict semantics | `remove` replaces the local file; `skip` leaves it; download into an empty dir works. |
 | S7 | Weird names round-trip | Spaces, Unicode, `#`, `+`, `%`, `&`, `$`, `[1]` all upload and list correctly **after escaping `[`**. |
-| S8 | Auth expiry | **Deferred** — expiring the session would break the rest of the suite. |
+| S8 | Auth expiry | Live expiry still **deferred** (it would break the rest of the suite). The pdsync contract is covered deterministically through FakeProtonCli fault injection — see §7. |
 | S9 | Trash and restore | `fs trash a b` works (multi-path). `/trash/name` restore works. `/trash` is account-global and **names can repeat**, so name-based restore is ambiguous. |
 | S10 | Folder creation | `create-folder` fails if the folder exists or the parent is missing. Uploading a folder twice with `merge` is idempotent. |
 | S11 | Is the remote case-sensitive? | **Yes.** Uploading `Name.txt` where `name.txt` exists creates **two nodes**. |
@@ -98,11 +98,45 @@ already reflected in the spec:
   the remote casing — consistent with "casing is local".
 - Hardlink staging uploads behave like normal files.
 
+## 7. Auth expiry (S8)
+
+The real CLI was **not** deliberately expired: invalidating the account session
+would break the rest of the suite and require a live re-login. The pdsync-side
+contract is instead exercised deterministically with the fake CLI, which can
+return exit code 3 after an arbitrary invocation.
+
+Expected behavior, covered by `tests/PdSync.Tests/AuthExpiryTests.cs`:
+
+- A mid-run auth failure aborts the run with **exit code 3** (`ProtonAuthException`).
+- The failing CLI call is **never retried**; `invocations.jsonl` shows exactly
+  one attempt. This holds for idempotent reads too, and is separate from the
+  transient retry/backoff path in SPEC §6.4.
+- No transfer or deletion is performed for the failed action, and no later
+  action runs. Actions already committed before the failure stay committed.
+- The failed action is **not committed to state**: its pending journal row is
+  removed and the entry transaction rolls back. The next run re-plans it from
+  the local and remote snapshots.
+- Stderr includes the recovery command `proton-drive auth login`.
+
+These tests run automatically in the normal `dotnet test` suite under
+`Category=AuthExpiry`. They are **not opt-in** and do not require a real Proton
+account, because the fault is injected inside the fake process. A live
+auth-expiry probe remains out of scope until it can restore the session safely.
+
+**Recovery:** run `proton-drive auth login` (or `proton-drive auth status` to
+confirm), then rerun `pdsync run --config <config>`. `pdsync plan` is read-only
+and will show the remaining work before the rerun.
+
+```powershell
+dotnet test tests/PdSync.Tests/PdSync.Tests.csproj --no-build --nologo `
+  --filter "Category=AuthExpiry"
+```
+
 ## Not tested
 
 | Item | Why | Plan |
 |---|---|---|
-| S8 auth expiry | Would break the authenticated session for the suite | Detect from stderr; add an opt-in fault-injection test later |
+| S8 live auth expiry | Would break the authenticated session for the suite | pdsync's exit-3/abort/no-retry/no-commit contract is covered by fake-CLI tests (§7); only the real CLI's silent-refresh behavior remains unprobed |
 | S15 restore by UID | Not yet probed | M1, using a collision with two same-named trash entries |
 | 429 / rate limits | Would require hammering the API | Retry with backoff implemented for all calls on 429 (request did not execute); idempotent calls also retry timeout/5xx/network resets. Measure tuning in a long live run. |
 | Large files / resume | Time and quota | M2, with a ≥1 GB file |

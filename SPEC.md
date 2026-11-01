@@ -101,15 +101,15 @@ selected local root, the ignore content written by `init` (new or interactively
 replaced) also contains an anchored ignore rule for the config's relative POSIX
 path, so the config is not synced as ordinary content. On Windows the rule uses
 the on-disk casing of existing directory components, so a `--config` path typed
-with different casing still matches the scanner's relative path. The rule starts with `/`
-so it does not match a same-named file in a subdirectory, and literal `[`, `*`,
-and `?` characters are written as bracket expressions. Before committing the
-staged ignore file, `init` loads it and requires the config path to be ignored;
-a path MAB cannot represent safely (for example `!` or `^`) is a config error
-(exit 4) and leaves no config or ignore file behind. A config outside the local
-root adds no such rule. An ignore destination that is a directory
-is rejected before the config is written, and a failed ignore write rolls back
-a config created by this invocation. `init` does not open or create the state
+with different casing still matches the scanner's relative path. The rule starts
+with `/` so it does not match a same-named file in a subdirectory, and literal
+`[`, `*`, and `?` characters are written as bracket expressions. Before
+committing the staged ignore file, `init` loads it and requires the config path
+to be ignored; a path MAB cannot represent safely (for example `!` or `^`) is a
+config error (exit 4) and leaves no config or ignore file behind. A config
+outside the local root adds no such rule. An ignore destination that is a
+directory is rejected before the config is written, and a failed ignore write
+rolls back a config created by this invocation. `init` does not open or create the state
 DB, take the run lock, write fast counters or logs, or call the Proton CLI.
 Positional sync names and the `--fast`/`--full` scan flags are not meaningful for
 `init` and are rejected as usage errors (exit 1).

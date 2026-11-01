@@ -47,6 +47,31 @@ pwsh -NoProfile -File tools/live-smoke.ps1
 `--yes`, `--no-color`, and `--config` are recognized. `plan`, `run`, `doctor`,
 and `status` are implemented; `init`, `ignore`, `history`, and `rebuild` are not.
 
+### Agent role skills
+
+Project-local role overlays live under `.agents/skills/`:
+
+- `pdsync-orchestrator` — Orca Run/Task/Dispatch workflow, review/fix gates,
+  and final merge ownership.
+- `pdsync-reviewer` — independent read-only review, severity format, verdict.
+- `pdsync-security` — pdsync-specific threat model and security review; loads
+  the global `security-audit` skill in guidance mode.
+- `pdsync-merger` — pre-merge checklist, merge-commit convention, and
+  post-merge verification.
+- `pdsync-escalation` — classify and package out-of-scope tasks, SPEC gaps, and
+  uncovered design decisions for the orchestrator.
+
+These are workflow overlays, not substitutes for this file or `SPEC.md`. Read
+both first; use `/skill:<name>` to force a role. The implementer role is this
+file plus `SPEC.md`, so there is no separate implementation skill.
+
+**Escalation policy.** Workers must not silently expand the current PR or invent
+behavior that `SPEC.md` does not cover. A concrete follow-up becomes a GitHub
+issue; a design decision becomes a `Decision: ...` issue labeled `decision` and
+is routed to the user through the orchestrator. Blocking decisions stop the
+affected task. Only after the user decides is `SPEC.md` updated and the decision
+issue closed.
+
 ---
 
 ## 2. Architecture and file map

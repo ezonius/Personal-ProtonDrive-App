@@ -86,6 +86,11 @@ public static class CliApp
                 error.WriteLine("config: " + item);
             return 4;
         }
+        catch (IgnoreRulesException ex)
+        {
+            error.WriteLine("config: " + ex.Message);
+            return 4;
+        }
         catch (ProtonAuthException ex)
         {
             error.WriteLine("auth: " + ex.Message);
@@ -159,6 +164,10 @@ public static class CliApp
             {
                 throw;
             }
+            catch (IgnoreRulesException)
+            {
+                throw;
+            }
             catch (Exception ex) when (ex is SyncException or ScanException or ProtonCliException or StateException)
             {
                 error.WriteLine($"sync '{sync.Name}': {ex.Message}");
@@ -228,6 +237,10 @@ public static class CliApp
             {
                 throw;
             }
+            catch (IgnoreRulesException)
+            {
+                throw;
+            }
             catch (Exception ex) when (ex is SyncException or ScanException or ProtonCliException or StateException)
             {
                 error.WriteLine($"sync '{sync.Name}': {ex.Message}");
@@ -269,6 +282,10 @@ public static class CliApp
         {
             version = new ProtonCli(config.Proton.Cli).GetVersion();
             checks.Add(new DoctorCheck("proton-drive", true, version));
+        }
+        catch (ProtonAuthException)
+        {
+            throw;
         }
         catch (Exception ex)
         {

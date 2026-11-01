@@ -108,6 +108,19 @@ public sealed class ProtonCliRetryTests : IDisposable
     }
 
     [Fact]
+    public void GetVersion_AuthFailureIsProtonAuthException()
+    {
+        Scenario("""{ "rules": [ { "match": "--version", "authExpired": true } ] }""");
+
+        var exception = Assert.Throws<ProtonAuthException>(() => Cli().GetVersion());
+
+        exception.Kind.Should().Be(ProtonFailureKind.Auth);
+        exception.ExitCode.Should().Be(3);
+        exception.Attempts.Should().Be(1);
+        exception.Message.Should().Contain("proton-drive auth login");
+    }
+
+    [Fact]
     public void CreateFolder_RetriesRateLimitBecauseNothingExecuted()
     {
         SeedRoot();

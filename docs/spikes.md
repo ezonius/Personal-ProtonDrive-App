@@ -117,10 +117,11 @@ Expected behavior, covered by `tests/PdSync.Tests/AuthExpiryTests.cs`:
   before the primary CLI call (the covered cases), no transfer or deletion is
   performed. A **post-transfer** auth failure — after a successful upload but
   before verification or a staged rename — can leave a remote revision or a
-  `pdsync-upload-<12 lowercase hex>` node behind. The executor best-effort
-  trashes the just-created staged node in the same run; if cleanup cannot run,
-  the next run's planner trashes the baseline-absent leftover with a
-  `cleanup staged upload` action instead of downloading it.
+  `pdsync-upload-<12 lowercase hex>` node behind. Same-run cleanup is
+  deliberately skipped on auth failure because the session is gone; the next
+  run's planner trashes the baseline-absent leftover with a
+  `cleanup staged upload` action instead of downloading it. Non-auth
+  rename/verification failures still attempt same-run best-effort cleanup.
 - The failed action is **not committed to state**: its pending journal row is
   removed and the entry transaction rolls back. The next run re-plans it from
   the local and remote snapshots.

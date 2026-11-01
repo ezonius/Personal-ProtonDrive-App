@@ -334,11 +334,13 @@ public sealed class Executor
 
         var uploadedLeaf = Path.GetFileName(uploadPath);
         var renamed = false;
+        var uploadResultReceived = false;
         try
         {
             var result = _cli.Upload(uploadPath, RemoteFull(parent));
             if (result.TransferredItems == 0 && result.SkippedItems == 0)
                 throw new SyncException($"upload reported no transfer for {action.Path}");
+            uploadResultReceived = true;
 
             if (staging &&
                 !string.Equals(uploadedLeaf, remoteName, StringComparison.Ordinal))
@@ -353,19 +355,25 @@ public sealed class Executor
         }
         catch (ProtonAuthException)
         {
-            // The CLI session is gone, so cleanup would fail too. The next run
-            // picks up the leftover staging node (Planner cleanup action).
+            // The CLI session is gone, so same-run cleanup is deliberately
+            // skipped: a second CLI call cannot succeed and could stall or raise
+            // a second auth error. The next run's planner trashes the leftover.
             throw;
         }
         catch
         {
-            // The upload result was received but a later rename/verification
-            // step failed. Best-effort trash the just-created remote node, but
-            // never replace the original exception. A pre-existing remote file
-            // is not trashed when the upload became a new revision on it.
-            var currentLeaf = renamed ? remoteName : uploadedLeaf;
-            if (StagedUpload.IsStagingLeaf(currentLeaf) || existing is null)
-                TryTrashUploadedNode(RemoteFull(parent), currentLeaf);
+            // Only a post-transfer failure is eligible for same-run cleanup.
+            // An upload call that threw before returning a result did not prove
+            // that any remote node exists, so it must not trigger a trash.
+            if (uploadResultReceived)
+            {
+                // Best-effort trash the just-created remote node, but never
+                // replace the original exception. A pre-existing remote file is
+                // not trashed when the upload became a new revision on it.
+                var currentLeaf = renamed ? remoteName : uploadedLeaf;
+                if (StagedUpload.IsStagingLeaf(currentLeaf) || existing is null)
+                    TryTrashUploadedNode(RemoteFull(parent), currentLeaf);
+            }
             throw;
         }
         finally

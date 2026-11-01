@@ -66,6 +66,13 @@ public sealed record PlanAction(
 
     public bool IsUpload => Kind is PlanActionKind.UploadCreate or PlanActionKind.UploadRevision or PlanActionKind.KeepBothUpload;
     public bool IsDownload => Kind is PlanActionKind.DownloadCreate or PlanActionKind.DownloadReplace or PlanActionKind.DownloadRestore;
+
+    /// <summary>
+    /// True for user-driven deletions subject to the safety budget. Staged-upload
+    /// orphan cleanup is deliberately excluded: it is not a user deletion, does
+    /// not count in <see cref="PlanStats.Deletions"/>, and a backlog of leftovers
+    /// must never trip the budget that protects user data.
+    /// </summary>
     public bool IsDelete => Kind is PlanActionKind.LocalTrash or PlanActionKind.RemoteTrash;
 }
 

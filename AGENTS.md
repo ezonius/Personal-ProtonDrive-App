@@ -96,6 +96,7 @@ src/PdSync/
     ProtonCli.cs             ONLY process-spawning class: list/info/upload/...
     RemotePath.cs            POSIX remote path codec + validation
     RemoteSnapshot.cs        remote tree snapshot, uid/path lookups
+    StagedUpload.cs          exact staged-upload name grammar + generation
   Remote/
     RemoteIndex.cs           BFS remote listing; fast-mode baseline synthesis
     FastRemoteScan.cs        subtree skip predicate + fast/full run counter
@@ -214,6 +215,7 @@ parallelism is otherwise disabled in the assembly/test setup.
 - Remote-index/fake integration: `PlannerFakeTests.cs`.
 - Ignore/MAB behavior: `IgnoreRulesTests.cs`.
 - Ignore explanation and path resolution: `IgnoreExplainTests.cs`.
+- Staged-upload name grammar boundaries: `StagedUploadTests.cs`.
 - Path folding/validation: `ConfigTests.cs`, `StateStoreTests.cs`.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 

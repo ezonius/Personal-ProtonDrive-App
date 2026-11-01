@@ -385,7 +385,7 @@ subtree operations.
 |---|---|---|---|---|---|
 | – | – | – | – | – | none |
 | – | yes | – | – | – | `upload.create` |
-| – | – | yes | – | – | `download.create` |
+| – | – | yes | – | – | `download.create`, or `cleanup.staged-upload` for an exact staging-leaf leftover (footnote) |
 | – | yes | yes | – | – | **initial adoption** (§5.3) |
 | yes | yes | yes | 0 | 0 | none |
 | yes | yes | yes | 1 | 0 | `upload.revision` |
@@ -404,6 +404,14 @@ fall back to `R.claimedSize == L.size` and
 `|R.claimedModificationTime − L.mtime| ≤ mtimeToleranceMs`. This catches
 re-uploads and clock-skew cases without a transfer. It is an optimization only;
 it never invents content.
+
+**Staging-leftover footnote.** When B is absent, L is absent, and R is a file
+whose leaf is exactly `pdsync-upload-` followed by 12 lowercase hex characters,
+the action is `cleanup.staged-upload` (Proton Trash) instead of
+`download.create`. Baseline-tracked, adopted, non-matching, and directory nodes
+never take this branch. `cleanup.staged-upload` is not a user deletion: it is
+excluded from `PlanAction.IsDelete`, does not increment `PlanStats.Deletions`,
+and is excluded from the §8 deletion budget.
 
 ### 5.2 Conflicts
 
@@ -558,10 +566,12 @@ Notes:
   and then renamed to the real name. If the upload result was received but the
   rename or verification fails, the executor best-effort trashes the
   just-created staged remote node before rethrowing the original failure. A
-  cleanup failure never masks that failure. Any remote-only leftover whose leaf
-  matches the exact staging grammar and is not in the baseline is trashed by the
-  next run as a `cleanup staged upload` action, never downloaded or treated as a
-  conflict. Both paths use Proton Trash, never permanent deletion.
+  cleanup failure never masks that failure. An auth-classified failure is the
+  exception: the session is gone, so same-run cleanup is skipped and the next
+  run handles the leftover. Any remote-only leftover whose leaf matches the
+  exact staging grammar and is not in the baseline is trashed by the next run as
+  a `cleanup staged upload` action, never downloaded or treated as a conflict.
+  Both paths use Proton Trash, never permanent deletion.
 - Downloads are **always per file** into a staging directory, never a recursive
   folder download, so we control replacement and verification.
 - All calls are serialized. Parallelism is intentionally not used: the CLI shares
@@ -651,13 +661,16 @@ Retry policy (implementation in `ProtonCli`, `ProtonRetryOptions`):
   runs, and no state is committed for the failed action. Already-committed
   actions remain. If auth expires after a transfer but before its verification
   or staged rename, a remote revision or a `pdsync-upload-<12 lowercase hex>`
-  node may already exist. When the upload result was received, the executor
-  best-effort trashes the just-created staged node before rethrowing the auth
-  failure (cleanup errors never mask the original exception); if cleanup cannot
-  run, the next run's `cleanup staged upload` action trashes the matching
-  baseline-absent leftover instead of downloading it. Recovery is
-  `proton-drive auth login` followed by a rerun, which re-plans the failed work
-  from snapshots. S8
+  node may already exist. Same-run cleanup is deliberately **skipped** for
+  auth-classified failures: the session is gone, so a second CLI call cannot
+  succeed and risks a second auth error or stall. The next run's
+  `cleanup staged upload` action trashes the matching baseline-absent leftover
+  instead of downloading it. For non-auth rename/verification failures after
+  the upload result was received, the executor best-effort trashes the
+  just-created staged node before rethrowing the original failure (cleanup
+  errors never mask it).
+  Recovery is `proton-drive auth login` followed by a rerun, which re-plans the
+  failed work from snapshots. S8
   coverage is deterministic fake-CLI (`AuthExpiryTests`,
   `Category=AuthExpiry`), not a live expiry probe.
 - Per-item `failedItems > 0` in upload/download JSON is treated as a permanent
@@ -829,12 +842,18 @@ read these files.
 Non-negotiable, enforced before any destructive action:
 
 1. Never delete/trash remotely unless `onLocalDelete: remote-trash` and the
-   entry exists in B with `L` gone and `RΔ = 0`.
+   entry exists in B with `L` gone and `RΔ = 0`. **Exception:**
+   `cleanup.staged-upload` may Proton-Trash a remote-only, baseline-absent file
+   whose leaf is exactly `pdsync-upload-<12 lowercase hex>`; it never applies to
+   baseline-tracked, adopted, non-matching, or directory nodes.
 2. Never delete a local file except into the local trash; never `unlink` a
    synced file directly.
 3. **Deletion budget**: abort the run before executing deletions if
    `maxDeletes` or `maxDeletePercent` would be exceeded, unless `--force`.
    Prevents a bad ignore pattern or a detached drive from wiping a tree.
+   `cleanup.staged-upload` is excluded from this budget (and from
+   `PlanStats.Deletions`): it is baseline-absent orphan cleanup, not a user
+   deletion, and a backlog of leftovers must never block its own cleanup.
 4. Refuse to run if the local root is missing, empty-but-previously-non-empty, or
    not a directory. "Empty" is a hard stop when B has entries, not a silent mass
    delete.
@@ -984,11 +1003,12 @@ cannot represent — that is the documented hard error.
    assert state plus `invocations.jsonl`. Smoke: `tools/FakeProtonCli/smoke.ps1`.
    S8 auth expiry is covered automatically (no live session) by
    `AuthExpiryTests`: exit 3, one attempt, no later action, and no state commit
-   for the failed action. A post-transfer rename/verification failure
+   for the failed action. A post-transfer **auth** failure skips same-run
+   cleanup (the session is gone) and leaves a baseline-absent
+   `pdsync-upload-<12 lowercase hex>` leftover for the next run's
+   `cleanup staged upload` action. A non-auth rename/verification failure
    best-effort trashes the just-created staged node in the same run; if cleanup
-   fails, the next run's planner trashes a baseline-absent
-   `pdsync-upload-<12 lowercase hex>` leftover via a `cleanup staged upload`
-   action.
+   fails, the next run's planner trashes the baseline-absent leftover.
 5. **Live smoke (opt-in)** — scratch remote folder `/my-files/pdsync-test`:
    create/modify/rename/delete both sides, conflict, ignore negation/anchoring, empty
    folders, large file, unicode names; then clean up.
@@ -1077,7 +1097,7 @@ v1 ships at M4; M5 is the "leave it running" bar.
 
 | Question | Decision | Where it landed |
 |---|---|---|
-| Post-transfer auth failure | The failed CLI call is not retried, later actions stop, and no state is committed. A transfer that completed before verification/rename may exist remotely; a staged upload is best-effort trashed in the same run, and a baseline-absent `pdsync-upload-<12 lowercase hex>` leftover is trashed by the next run's `cleanup staged upload` action (Proton Trash only). | §6.2, §6.4, `docs/spikes.md` S8, #21, #23 |
+| Post-transfer auth failure | The failed CLI call is not retried, later actions stop, and no state is committed. A transfer that completed before verification/rename may exist remotely; same-run cleanup is deliberately skipped because the session is gone, and a baseline-absent `pdsync-upload-<12 lowercase hex>` leftover is trashed by the next run's `cleanup staged upload` action (Proton Trash only). | §6.2, §6.4, `docs/spikes.md` S8, #21, #23 |
 | `init --yes` defaults | Accept current defaults: cwd as local root, derived sync name, `/my-files/<name>` remote root, and the default junk/temp/log ignore set. | §3.1, #27 |
 | `ignore --json` matched path | Git-shaped, implemented in #29: `path` is the queried pathname; `matchedPath` is removed; `matchedAncestor` is emitted only when a parent-directory rule decides the result and is omitted for direct/self matches and no-match results. | §3.3 rule 7, #25, implementation #29 |
 | `init` config inside the sync root | Append the generated config's relative POSIX path to the `.pdignore` produced by `init` when the config lies under the local root. | §3.1/§3.3, #28, implementation #30 |

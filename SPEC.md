@@ -240,7 +240,10 @@ Additional rules specific to sync:
    strictly read-only: it does not open or create the state DB, take the run
    lock, write fast counters, or create logs. `--json` emits `command`, `sync`, `root`,
    `ignoreFile`, `path`, `kind`, `ignored`, `verdict`, `pattern`, `rule`,
-   `source`, `sourceKind`, `line`, and `matchedPath`.
+   `source`, `sourceKind`, and `line`. `path` is the queried pathname (the same
+   shape Git reports), and `matchedAncestor` appears only when the deciding rule
+   matched a parent directory; it is omitted for direct/self matches and for
+   no-match results.
 
 Example `.pdignore`:
 
@@ -1053,7 +1056,7 @@ v1 ships at M4; M5 is the "leave it running" bar.
 |---|---|---|
 | Post-transfer auth failure | Documentation-only for now: the failed CLI call is not retried, later actions stop, and no state is committed; a transfer that completed before verification/rename may exist remotely and is reconciled next run. Revisit stronger handling after staged-upload cleanup (#21). | §6.4, `docs/spikes.md` S8, #23 |
 | `init --yes` defaults | Accept current defaults: cwd as local root, derived sync name, `/my-files/<name>` remote root, and the default junk/temp/log ignore set. | §3.1, #27 |
-| `ignore --json` matched path | Git-shaped: `path` is the queried pathname; replace `matchedPath` with an optional `matchedAncestor` only when a parent-directory rule decides the result. | §3.3 rule 7, #25, implementation #29 |
+| `ignore --json` matched path | Git-shaped, implemented in #29: `path` is the queried pathname; `matchedPath` is removed; `matchedAncestor` is emitted only when a parent-directory rule decides the result and is omitted for direct/self matches and no-match results. | §3.3 rule 7, #25, implementation #29 |
 | `init` config inside the sync root | Append the generated config's relative POSIX path to the `.pdignore` produced by `init` when the config lies under the local root. | §3.1/§3.3, #28, implementation #30 |
 
 Still open (can be decided during M0/M4, not blocking design):

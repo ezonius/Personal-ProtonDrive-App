@@ -84,6 +84,7 @@ src/PdSync/
   Program.cs                 entry point -> CliApp.Run
   Cli/CliApp.cs              argument parsing, command handlers, human/JSON output
   Cli/InitCommand.cs         `init`: prompts, generated config/.pdignore, no-overwrite
+  Cli/TrashCommand.cs        `trash list|purge`: local retention, read-only list
   Diagnostics/
     DesktopMappingDetector.cs  read-only Proton Drive desktop-app Mappings.json probe
   Config/
@@ -115,6 +116,7 @@ src/PdSync/
     Verifier.cs              size/SHA-1 upload verify; sample/full download-back
     SafetyGuard.cs           empty-tree guard + deletion budget
     LocalTrashStore.cs       local trash moves + per-run manifest
+    LocalTrashIndex.cs       read-only trash inventory + guarded whole-run purge
     RunLock.cs               per-sync exclusive lock
     FileSystemUtil.cs        cross-volume move fallback
   State/StateStore.cs        SQLite schema, transactions, read-only mode

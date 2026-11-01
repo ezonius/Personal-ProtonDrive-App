@@ -132,6 +132,11 @@ public static class InitCommand
                 $"init: ignore path is a directory: {ignoreFile}; remove it or choose another local root.");
         }
 
+        // A config created inside the local root would otherwise be synced as
+        // an ordinary file. Ignore it by default; a config outside the root (or
+        // the ignore file itself, already rejected above) needs no entry.
+        var ignoreText = BuildIgnoreText(configPath, sync.LocalRoot);
+
         var ignoreExists = File.Exists(ignoreFile);
         var overwroteIgnore = false;
         if (ignoreExists)
@@ -166,7 +171,7 @@ public static class InitCommand
             // Stage the ignore text next to its destination, then move it into
             // place so a failed write never leaves a truncated ignore file.
             ignoreTemp = ignoreFile + ".pdsync-init-" + Guid.NewGuid().ToString("N");
-            File.WriteAllText(ignoreTemp, DefaultIgnoreText + Environment.NewLine);
+            File.WriteAllText(ignoreTemp, ignoreText);
             File.Move(ignoreTemp, ignoreFile, overwrite: true);
             ignoreTemp = null;
         }
@@ -268,6 +273,24 @@ public static class InitCommand
         {
             // Best effort rollback; the original write error is more useful.
         }
+    }
+
+    /// <summary>
+    /// Builds the ignore-file content written by init. When the generated
+    /// config lives inside the local root, its relative POSIX path is appended
+    /// so the config is not uploaded or downloaded as sync content.
+    /// </summary>
+    internal static string BuildIgnoreText(string configPath, string localRoot)
+    {
+        var text = DefaultIgnoreText + Environment.NewLine;
+        if (!PathUtil.IsSameOrUnder(configPath, localRoot))
+            return text;
+
+        var relative = Path.GetRelativePath(localRoot, configPath);
+        if (relative is "." or "")
+            return text;
+
+        return text + relative.Replace('\\', '/') + Environment.NewLine;
     }
 
     private static string Absolute(string value, string field) =>

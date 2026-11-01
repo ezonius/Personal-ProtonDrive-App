@@ -2,6 +2,7 @@ using System.Text.Json;
 using FluentAssertions;
 using PdSync.Cli;
 using PdSync.Config;
+using PdSync.Scan;
 
 namespace PdSync.Tests;
 
@@ -46,6 +47,9 @@ public sealed class InitCommandTests : IDisposable
 
         File.ReadAllText(sync.IgnoreFile).Should().Contain("*.tmp");
         File.ReadAllText(sync.IgnoreFile).Should().Contain("*.log");
+        // The config lives outside the local root, so no config line is added.
+        File.ReadAllText(sync.IgnoreFile).Should().NotContain("pdsync.yaml");
+        IgnoreRules.Load(sync).IsIgnored("pdsync.yaml", isDirectory: false).Should().BeFalse();
 
         // Init must not create state, logs, fast counters, or anything else.
         Directory.Exists(Path.Combine(local, "state")).Should().BeFalse();
@@ -172,6 +176,24 @@ public sealed class InitCommandTests : IDisposable
     }
 
     [Fact]
+    public void ExistingIgnoreFile_InteractiveOverwriteInsideRoot_AddsConfigLine()
+    {
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        var ignoreFile = _temp.Write("docs/.pdignore", "# sentinel\n");
+        var configPath = Path.Combine(local, "config", "pdsync.yaml");
+
+        var result = CliInput(
+            $"{local}\ndocs\n/my-files/docs\nyes\n",
+            "init", "--config", configPath);
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
+        File.ReadAllText(ignoreFile).Should().NotContain("# sentinel");
+        IgnoreRules.Load(sync).IsIgnored("config/pdsync.yaml", isDirectory: false).Should().BeTrue();
+    }
+
+    [Fact]
     public void InvalidSyncName_IsRejectedWithoutPartialFiles()
     {
         var local = _temp.Combine("docs");
@@ -286,6 +308,54 @@ public sealed class InitCommandTests : IDisposable
         File.Exists(configPath).Should().BeTrue();
         ConfigLoader.Load(configPath).Syncs.Should().ContainSingle();
         File.Exists(Path.Combine(local, ".pdignore")).Should().BeTrue();
+    }
+
+    [Fact]
+    public void DefaultInit_ConfigInsideLocalRoot_IsIgnored()
+    {
+        var local = _temp.Combine("fresh");
+        Directory.CreateDirectory(local);
+
+        var result = WithEnvironment(
+            ConfigLoader.ConfigEnvironmentVariable, null,
+            () => InDirectory(local, () => CliWithDiscovery(() => null, "init", "--yes")));
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        var configPath = Path.GetFullPath(Path.Combine(local, "pdsync.yaml"));
+        var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
+        File.ReadAllText(sync.IgnoreFile).Should().Contain("pdsync.yaml");
+        IgnoreRules.Load(sync).IsIgnored("pdsync.yaml", isDirectory: false).Should().BeTrue();
+    }
+
+    [Fact]
+    public void NestedConfigInsideLocalRoot_UsesItsRelativePosixPath()
+    {
+        var local = _temp.Combine("fresh");
+        Directory.CreateDirectory(local);
+        var configPath = Path.Combine(local, "config", "pdsync.yaml");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
+        var rules = IgnoreRules.Load(sync);
+        rules.IsIgnored("config/pdsync.yaml", isDirectory: false).Should().BeTrue();
+        rules.IsIgnored("pdsync.yaml", isDirectory: false).Should().BeFalse();
+    }
+
+    [Fact]
+    public void ConfigOutsideLocalRoot_AddsNoConfigLine()
+    {
+        var local = _temp.Combine("fresh");
+        Directory.CreateDirectory(local);
+        var configPath = _temp.Combine("elsewhere", "pdsync.yaml");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
+        File.ReadAllText(sync.IgnoreFile).Should().NotContain("pdsync.yaml");
+        IgnoreRules.Load(sync).IsIgnored("pdsync.yaml", isDirectory: false).Should().BeFalse();
     }
 
     [Fact]

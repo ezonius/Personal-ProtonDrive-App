@@ -96,7 +96,11 @@ that resolves to the same file as the ignore file is rejected (exit 4). An
 existing config is never overwritten (exit 4), including a config created
 concurrently after the initial probe (the write uses exclusive create). An
 existing `.pdignore` is never overwritten under `--yes`; interactively it is
-replaced only after an explicit yes. An ignore destination that is a directory
+replaced only after an explicit yes. When the generated config lies inside the
+selected local root, the ignore content written by `init` (new or interactively
+replaced) also contains the config's relative POSIX path, so the config is not
+synced as ordinary content. A config outside the local root adds no such line.
+An ignore destination that is a directory
 is rejected before the config is written, and a failed ignore write rolls back
 a config created by this invocation. `init` does not open or create the state
 DB, take the run lock, write fast counters or logs, or call the Proton CLI.
@@ -214,7 +218,10 @@ Additional rules specific to sync:
 3. If a previously synced path becomes ignored, it is dropped from the active
    state with a `frozen` record; it is not trashed.
 4. Ignored files do not count as local deletions (and vice versa).
-5. The ignore file itself is synced unless explicitly ignored.
+5. The ignore file itself is synced unless explicitly ignored. `init` appends
+   the generated config's relative POSIX path to the ignore file when that
+   config is inside the local root (see §3.1), so the config is ignored by
+   default; a config outside the root needs no entry.
 6. Patterns are evaluated on the **relative POSIX path** with a trailing `/` for
    directories, matching the `ignore` package's contract.
 7. `pdsync ignore <path> [--sync <name>] [--json]` explains the verdict for

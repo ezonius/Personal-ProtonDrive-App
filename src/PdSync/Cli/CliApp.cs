@@ -306,10 +306,11 @@ public static class CliApp
             _ = cli.List("/");
             checks.Add(new DoctorCheck("auth", true, "authenticated"));
         }
-        catch (ProtonAuthException ex)
+        catch (ProtonAuthException)
         {
-            failed = true;
-            checks.Add(new DoctorCheck("auth", false, ex.Message));
+            // Auth failures are not doctor findings: surface them through the
+            // top-level auth mapping so every probe exits 3 consistently.
+            throw;
         }
         catch (Exception ex)
         {
@@ -331,10 +332,9 @@ public static class CliApp
                 checks.Add(new DoctorCheck($"sync {sync.Name} remote", true,
                     $"{sync.RemoteRoot} ({children.Count} child{(children.Count == 1 ? "" : "en")})"));
             }
-            catch (ProtonAuthException ex)
+            catch (ProtonAuthException)
             {
-                failed = true;
-                checks.Add(new DoctorCheck($"sync {sync.Name} remote", false, ex.Message));
+                throw;
             }
             catch (Exception ex)
             {

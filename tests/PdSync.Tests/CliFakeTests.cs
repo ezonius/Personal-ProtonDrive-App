@@ -469,7 +469,55 @@ public sealed class CliFakeTests
         var result = fixture.Cli("doctor");
 
         result.ExitCode.Should().Be(3, result.Stdout + result.Stderr);
-        result.Stderr.Should().Contain("auth:");
+        result.Stderr.Should().Contain("auth:").And.Contain("auth login");
+    }
+
+    [Fact]
+    public void Doctor_AuthStatusAuthFailureReturnsExit3()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs list --json /$", "authExpired": true } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("doctor");
+
+        result.ExitCode.Should().Be(3, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("auth:").And.Contain("auth login");
+    }
+
+    [Fact]
+    public void Doctor_RemoteListAuthFailureReturnsExit3()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs list --json /my-files/root$", "authExpired": true } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("doctor");
+
+        result.ExitCode.Should().Be(3, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("auth:").And.Contain("auth login");
+    }
+
+    [Fact]
+    public void Doctor_NonAuthProbeFailureReturnsExit1()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs list --json /$", "exitCode": 1, "stderr": "injected listing failure" } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("doctor");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("FAIL auth:").And.Contain("injected listing failure");
     }
 
     [Fact]

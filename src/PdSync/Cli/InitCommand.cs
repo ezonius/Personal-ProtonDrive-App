@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PdSync.Config;
+using PdSync.Scan;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
@@ -132,6 +133,12 @@ public static class InitCommand
                 $"init: ignore path is a directory: {ignoreFile}; remove it or choose another local root.");
         }
 
+        // A config created inside the local root would otherwise be synced as
+        // an ordinary file. Ignore it by default; a config outside the root (or
+        // the ignore file itself, already rejected above) needs no entry.
+        var configRelativePath = InRootRelativePath(configPath, sync.LocalRoot);
+        var ignoreText = BuildIgnoreText(configRelativePath);
+
         var ignoreExists = File.Exists(ignoreFile);
         var overwroteIgnore = false;
         if (ignoreExists)
@@ -166,12 +173,18 @@ public static class InitCommand
             // Stage the ignore text next to its destination, then move it into
             // place so a failed write never leaves a truncated ignore file.
             ignoreTemp = ignoreFile + ".pdsync-init-" + Guid.NewGuid().ToString("N");
-            File.WriteAllText(ignoreTemp, DefaultIgnoreText + Environment.NewLine);
+            File.WriteAllText(ignoreTemp, ignoreText);
+            ValidateIgnoreText(ignoreTemp, configRelativePath, configPath);
             File.Move(ignoreTemp, ignoreFile, overwrite: true);
             ignoreTemp = null;
         }
         catch (ConfigException)
         {
+            // Validation failures and other config errors must leave no staged
+            // ignore file and no config created by this invocation.
+            TryDelete(ignoreTemp);
+            if (configCreated)
+                TryDelete(configPath);
             throw;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -268,6 +281,82 @@ public static class InitCommand
         {
             // Best effort rollback; the original write error is more useful.
         }
+    }
+
+    /// <summary>
+    /// Relative POSIX path of the generated config when it is inside the local
+    /// root, or null when it is outside. Only the platform directory separator
+    /// is converted to '/': a literal backslash is a filename character on Unix
+    /// and is left intact for validation to accept or reject safely.
+    /// </summary>
+    internal static string? InRootRelativePath(string configPath, string localRoot)
+    {
+        if (!PathUtil.IsSameOrUnder(configPath, localRoot))
+            return null;
+
+        var relative = Path.GetRelativePath(localRoot, configPath);
+        if (relative is "." or "")
+            return null;
+
+        if (Path.DirectorySeparatorChar != '/')
+            relative = relative.Replace(Path.DirectorySeparatorChar, '/');
+
+        return relative;
+    }
+
+    /// <summary>
+    /// Builds the ignore-file content written by init. An in-root config gets a
+    /// root-anchored rule so a nested file with the same name stays included.
+    /// </summary>
+    internal static string BuildIgnoreText(string? configRelativePath)
+    {
+        var text = DefaultIgnoreText + Environment.NewLine;
+        if (configRelativePath is null)
+            return text;
+
+        return text + EscapeIgnorePattern(configRelativePath) + Environment.NewLine;
+    }
+
+    /// <summary>
+    /// Escapes a relative POSIX path for use as an anchored gitignore pattern.
+    /// MAB treats [, *, and ? as glob syntax, so each literal occurrence is
+    /// written as a bracket expression. The leading slash anchors the pattern
+    /// to the ignore file's directory.
+    /// </summary>
+    internal static string EscapeIgnorePattern(string configRelativePath) =>
+        "/" + configRelativePath
+            .Replace("[", "[[]", StringComparison.Ordinal)
+            .Replace("*", "[*]", StringComparison.Ordinal)
+            .Replace("?", "[?]", StringComparison.Ordinal);
+
+    /// <summary>
+    /// Loads the staged ignore file and requires the generated rule to ignore
+    /// the literal config path. MAB cannot represent every legal path; an
+    /// unrepresentable path becomes exit 4 before the staged file is moved into
+    /// place or any file is committed.
+    /// </summary>
+    private static void ValidateIgnoreText(string stagedIgnorePath, string? configRelativePath, string configPath)
+    {
+        if (configRelativePath is null)
+            return;
+
+        IgnoreRules rules;
+        try
+        {
+            rules = IgnoreRules.Load(stagedIgnorePath);
+            if (rules.Decide(configRelativePath, isDirectory: false).IsIgnored)
+                return;
+        }
+        catch (IgnoreRulesException ex)
+        {
+            throw new ConfigException(
+                $"init: cannot represent config path '{configPath}' in the generated ignore file: {ex.Message} " +
+                "Move the config outside the local root or choose a different --config path.");
+        }
+
+        throw new ConfigException(
+            $"init: generated ignore rule does not ignore config path '{configPath}'. " +
+            "Move the config outside the local root or choose a different --config path.");
     }
 
     private static string Absolute(string value, string field) =>

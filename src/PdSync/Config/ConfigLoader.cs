@@ -12,7 +12,17 @@ public static class ConfigLoader
 {
     public const string ConfigEnvironmentVariable = "PDSYNC_CONFIG";
 
-    public static string Discover(string? explicitPath = null)
+    public static string Discover(string? explicitPath = null) =>
+        FindExisting(explicitPath) ?? throw new ConfigException(
+            $"No config file found. Looked for ./pdsync.yaml, ./pdsync.yml, and {FallbackPath}; " +
+            $"or pass --config / set {ConfigEnvironmentVariable}.");
+
+    /// <summary>
+    /// Applies the documented discovery order and returns the first existing
+    /// config, or null when none exists. `init` uses the null case to decide
+    /// where a new config belongs without creating one.
+    /// </summary>
+    public static string? FindExisting(string? explicitPath = null)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
             return RequireFile(PathUtil.Expand(explicitPath, "--config"));
@@ -29,15 +39,14 @@ public static class ConfigLoader
         if (File.Exists(cwdYml))
             return Path.GetFullPath(cwdYml);
 
-        var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-        var fallback = Path.Combine(appData, "pdsync", "config.yaml");
-        if (File.Exists(fallback))
-            return Path.GetFullPath(fallback);
+        if (File.Exists(FallbackPath))
+            return Path.GetFullPath(FallbackPath);
 
-        throw new ConfigException(
-            $"No config file found. Looked for ./pdsync.yaml, ./pdsync.yml, and {fallback}; " +
-            $"or pass --config / set {ConfigEnvironmentVariable}.");
+        return null;
     }
+
+    private static string FallbackPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "pdsync", "config.yaml");
 
     public static PdsyncConfig Load(string? explicitPath = null)
     {

@@ -45,8 +45,8 @@ pwsh -NoProfile -File tools/live-smoke.ps1
 ```
 
 `--fast`, `--full`, `--force`, `--json`, `--verbose`, `--interactive`,
-`--yes`, `--no-color`, `--config`, and `--sync` are recognized. `plan`, `run`,
-`doctor`, `status`, and `ignore` are implemented; `init`, `history`, and
+`--yes`, `--no-color`, `--config`, and `--sync` are recognized. `init`, `plan`,
+`run`, `doctor`, `status`, and `ignore` are implemented; `history` and
 `rebuild` are not. `ignore` reports the deciding rule for a path and is
 read-only.
 
@@ -83,6 +83,7 @@ issue closed.
 src/PdSync/
   Program.cs                 entry point -> CliApp.Run
   Cli/CliApp.cs              argument parsing, command handlers, human/JSON output
+  Cli/InitCommand.cs         `init`: prompts, generated config/.pdignore, no-overwrite
   Diagnostics/
     DesktopMappingDetector.cs  read-only Proton Drive desktop-app Mappings.json probe
   Config/
@@ -217,7 +218,7 @@ parallelism is otherwise disabled in the assembly/test setup.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 
 Prefer behavior assertions over implementation details. The current suite is
-**226 tests**.
+**246 tests**.
 
 ---
 
@@ -293,12 +294,16 @@ Implemented and fake-tested:
 - Remote index, case/collision detection, fast-subtree synthesis.
 - Pure planner: creates, updates, deletes, conflicts, renames, adoption,
   directory ordering, incomplete scans.
-- `plan`, `run`, `doctor`, `status` CLI.
+- `init`, `plan`, `run`, `doctor`, `status` CLI.
 - `ignore` CLI (SPEC §3.3 rule 7): resolves a relative or rooted path against a
   sync root and explains the deciding rule via `IgnoreRules.Decide` — verdict,
   pattern, rule number, ignore-file line or inline `exclude[i]`, and matched
   ancestor. A trailing separator asks for directory intent; `--json` is stable.
   Read-only: no state DB open/create, run lock, fast counter, or log files.
+- `init` CLI (SPEC §3.1): interactively creates a validated `pdsync.yaml` and
+  a default `.pdignore`; `--yes` takes defaults. An existing config is never
+  overwritten (exit 4); an existing ignore file is only replaced after an
+  interactive yes. Read-only toward state, logs, locks, and Proton.
 - Executor: uploads/downloads, staging, verification, state commits, pending
   journal, local trash, Proton Trash, pruning, safety budgets, lock.
 - Fast/full mode and tracker.
@@ -319,7 +324,7 @@ Known gaps / likely next work:
   exhaustion, permanent failures, auth, and timeout recovery.
 - `logDir` JSONL run/action/verification logging is implemented; `history`
   does not read it yet.
-- `init`, `history`, and `rebuild` are not implemented.
+- `history` and `rebuild` are not implemented.
 - Interactive conflict prompting is not implemented; `ask` currently uses the
   non-interactive fallback.
 - S15 restore-by-UID is not wired (restore is not used by the sync engine yet).

@@ -494,6 +494,25 @@ public sealed class PlannerTests
         cleanup.Reason.Should().NotContain("automatic cleanup");
     }
 
+    [Fact]
+    public void CleanupStagedFlag_DefersWhenLocalScanIsIncomplete()
+    {
+        var path = "pdsync-upload-0123456789ab";
+        var b = BaselineFile(path, "a", ShaA, "uid-old", "rev-old");
+        var remote = RemoteFile(path, "uid-new", "rev-new", "leftover", ShaOf("leftover"));
+
+        var result = Plan(
+            [b],
+            ScanWith(issues: [new ScanIssue(path, "access denied")]),
+            Remote(remote),
+            cleanupStaged: true);
+
+        result.Actions.Should().NotContain(action =>
+            action.Kind == PlanActionKind.CleanupStagedUpload);
+        result.Skipped.Should().ContainSingle(skip =>
+            skip.Reason == PlanSkipReason.IncompleteLocalScan && skip.PathKey == PathKey.Fold(path));
+    }
+
     private static PlanResult Plan(
         IReadOnlyList<EntryRecord> baseEntries,
         LocalScan local,

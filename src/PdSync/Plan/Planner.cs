@@ -148,7 +148,12 @@ public static class Planner
             // automatically: it may have been user content. The explicit flag
             // allows trashing a remote-only artifact that would otherwise be
             // restored or conflict on every run.
-            if (context.CleanupStaged && b is not null && l is null && r is not null &&
+            // local.IsComplete is required: an incomplete scan can leave a
+            // present local file out of Entries, and trashing its remote node
+            // would violate the local-absent guard (SPEC §8). The ordinary
+            // IncompleteLocalScan deferral below handles that case.
+            if (context.CleanupStaged && local.IsComplete &&
+                b is not null && l is null && r is not null &&
                 !r.IsDirectory && StagedUpload.IsStagingLeaf(Leaf(r.Path)))
             {
                 actions.Add(new PlanAction(PlanActionKind.CleanupStagedUpload, r.Path, key,

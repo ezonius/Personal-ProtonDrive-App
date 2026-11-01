@@ -417,8 +417,8 @@ the action is `cleanup.staged-upload` (Proton Trash) instead of
 adopted, non-matching, and directory nodes never take this automatic branch.
 
 **Opt-in staging cleanup.** `run --cleanup-staged` adds a second branch for the
-adopted/historical case: B is present, L is absent, and R is a file whose leaf
-matches the same exact grammar. It produces `cleanup.staged-upload` with the
+adopted/historical case: the local scan is complete, B is present, L is absent,
+and R is a file whose leaf matches the same exact grammar. It produces `cleanup.staged-upload` with the
 reason prefix `opt-in cleanup:` instead of the normal delete-vs-modify,
 `download.restore`, or `remote.trash` decision. The local-absent guard is
 deliberate: trashing a node that still has a local counterpart would simply be
@@ -685,9 +685,13 @@ Retry policy (implementation in `ProtonCli`, `ProtonRetryOptions`):
   auth-classified failures: the session is gone, so a second CLI call cannot
   succeed and risks a second auth error or stall. The next run's
   `automatic cleanup` action trashes the matching baseline-absent leftover
-  instead of downloading it. A leftover that was already recorded in the
-  baseline is left alone unless the operator reruns with the explicit
-  `run --cleanup-staged` opt-in. For non-auth rename/verification failures after
+  instead of downloading it. The automatic cleanup branch never applies to a
+  leftover that is already recorded in the baseline; ordinary delete/restore
+  semantics still do, so an unchanged remote with a deleted local counterpart is
+  an ordinary local-delete → `remote.trash` (subject to the deletion budget),
+  while a modified remote is restored or conflicts normally. The explicit
+  `run --cleanup-staged` opt-in is the only way to treat such a baseline-recorded
+  node as staging cleanup. For non-auth rename/verification failures after
   the upload result was received, the executor best-effort trashes the
   just-created staged node before rethrowing the original failure (cleanup
   errors never mask it).
@@ -764,9 +768,12 @@ mapping's `Local.RootFolderPath` with every configured sync `local` root.
   open or migrate an existing database exactly as before (§7). The mapping probe
   and the staged-leftover probe do not write: the latter opens the baseline
   read-only and performs one complete remote listing. It reports every
-  grammar-matching remote file already present in the baseline (adopted or
-  historical) as `sync <name> staged leftovers` with path and UID; a warning does
-  not fail `doctor`. Baseline-absent leftovers belong to the automatic path and
+  unfrozen, non-ignored, grammar-matching remote file already present in the
+  baseline (adopted or historical) as `sync <name> staged leftovers` with path
+  and UID; a warning does not fail `doctor`. This is a candidate set: the probe
+  does not scan local presence or check the incomplete-local-scan guard, so
+  `run --cleanup-staged` acts only on candidates that are also locally absent in
+  a complete scan. Baseline-absent leftovers belong to the automatic path and
   are not reported here.
 - Overlap is classified with pdsync's identity rules (NFC + case-folded,
   segment-aware): exact, local root inside a mapping, or mapping inside a local
@@ -873,9 +880,10 @@ Non-negotiable, enforced before any destructive action:
    `cleanup.staged-upload` may Proton-Trash a remote-only file whose leaf is
    exactly `pdsync-upload-<12 lowercase hex>`, either automatically when it is
    baseline-absent or under the explicit `run --cleanup-staged` opt-in when it
-   is baseline-recorded and `L` is absent. It never applies to non-matching or
-   directory nodes, and the opt-in branch never applies while a local counterpart
-   exists.
+   is baseline-recorded and `L` is absent in a complete local scan. It never
+   applies to non-matching or directory nodes, and the opt-in branch never
+   applies while a local counterpart exists (including when the scan is
+   incomplete and the file is merely unscanned).
 2. Never delete a local file except into the local trash; never `unlink` a
    synced file directly.
 3. **Deletion budget**: abort the run before executing deletions if

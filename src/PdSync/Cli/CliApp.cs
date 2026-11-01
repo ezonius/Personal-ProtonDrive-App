@@ -349,13 +349,25 @@ public static class CliApp
             try
             {
                 using var baselineState = StateStore.OpenReadOnly(config, sync);
-                var baselineKeys = baselineState.LoadEntries(includeFrozen: true)
+                var ignoreRules = IgnoreRules.Load(sync);
+                // Frozen and ignored baseline entries are not actionable by
+                // run --cleanup-staged (those skips run before the opt-in
+                // branch), so they are excluded from the report. Local
+                // presence is intentionally not checked here; the planner's
+                // local-absent guard decides that, and SPEC §6.6 documents
+                // this list as the candidate set.
+                var candidateKeys = baselineState.LoadEntries(includeFrozen: true)
+                    .Where(entry => !entry.Frozen &&
+                                    !ignoreRules.IsIgnored(entry.Path, isDirectory: false))
                     .Select(entry => entry.PathKey)
                     .ToHashSet(StringComparer.Ordinal);
+                // A complete BFS is required: leftovers can live in nested
+                // folders. The earlier root List is kept for its user-facing
+                // child-count check, so doctor may list the root twice.
                 var remoteIndex = RemoteIndex.Build(cli, sync.RemoteRoot);
                 var leftovers = remoteIndex.Entries
                     .Where(entry => !entry.IsDirectory &&
-                                    baselineKeys.Contains(entry.PathKey) &&
+                                    candidateKeys.Contains(entry.PathKey) &&
                                     StagedUpload.IsStagingLeaf(Leaf(entry.Path)))
                     .Select(entry => $"{entry.Path} (uid {entry.Uid})")
                     .ToArray();
@@ -364,6 +376,10 @@ public static class CliApp
                         ? "none"
                         : $"{leftovers.Length} adopted/historical: {string.Join(", ", leftovers)}",
                     Warning: leftovers.Length > 0));
+            }
+            catch (ProtonAuthException)
+            {
+                throw;
             }
             catch (Exception ex)
             {

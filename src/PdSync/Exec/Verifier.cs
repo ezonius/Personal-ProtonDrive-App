@@ -4,6 +4,25 @@ using PdSync.Scan;
 
 namespace PdSync.Exec;
 
+/// <summary>Result detail for one upload/download verification, included in the run log.</summary>
+public sealed record VerificationSummary(
+    string Method,
+    string Result,
+    bool DownloadBack = false,
+    string? Detail = null);
+
+/// <summary>A failure raised by verification; carries the summary for the JSONL run log.</summary>
+public sealed class VerificationException : SyncException
+{
+    public VerificationException(VerificationSummary verification)
+        : base(verification.Detail ?? "verification failed")
+    {
+        Verification = verification;
+    }
+
+    public VerificationSummary Verification { get; }
+}
+
 /// <summary>
 /// Verification for uploads and downloads (SPEC §6.5). Digest claims are used
 /// as fingerprints, never as a security boundary. A missing digest downgrades
@@ -20,7 +39,10 @@ public sealed class Verifier
         _options = options;
     }
 
-    public ProtonNode VerifyUpload(string parentRemote, string expectedName, string localPath)
+    public (ProtonNode Node, VerificationSummary Verification) VerifyUpload(
+        string parentRemote,
+        string expectedName,
+        string localPath)
     {
         var info = new FileInfo(localPath);
         if (!info.Exists)
@@ -31,24 +53,25 @@ public sealed class Verifier
             string.Equals(n.Name, expectedName, StringComparison.Ordinal));
         if (node is null)
         {
-            throw new SyncException(
+            throw Fail("size",
                 $"verification failed: '{expectedName}' was not found in the remote parent after upload");
         }
 
         if (node.Size != info.Length)
         {
-            throw new SyncException(
+            throw Fail("size",
                 $"verification failed for '{expectedName}': remote size {node.Size} != local size {info.Length}");
         }
 
         if (_options.Mode == VerifyMode.Size)
-            return node;
+            return (node, new VerificationSummary("size", "ok"));
 
         var localSha1 = ContentHash.ComputeSha1(localPath);
+        var method = string.IsNullOrEmpty(node.Sha1) ? "size" : "size+sha1";
         if (!string.IsNullOrEmpty(node.Sha1) &&
             !string.Equals(localSha1, node.Sha1, StringComparison.OrdinalIgnoreCase))
         {
-            throw new SyncException(
+            throw Fail(method,
                 $"verification failed for '{expectedName}': local SHA-1 {localSha1} != remote claim {node.Sha1}");
         }
 
@@ -59,9 +82,19 @@ public sealed class Verifier
                      IsSampled(expectedName, localSha1, _options.SamplePercent));
 
         if (audit)
-            DownloadBackAndCompare(parentRemote, expectedName, info.Length, localSha1);
+        {
+            method += "+download-back";
+            try
+            {
+                DownloadBackAndCompare(parentRemote, expectedName, info.Length, localSha1);
+            }
+            catch (SyncException ex)
+            {
+                throw Fail(method, ex.Message, downloadBack: true);
+            }
+        }
 
-        return node;
+        return (node, new VerificationSummary(method, "ok", DownloadBack: audit));
     }
 
     private void DownloadBackAndCompare(
@@ -116,25 +149,33 @@ public sealed class Verifier
         return bucket % 100 < (uint)percent;
     }
 
-    public void VerifyDownload(RemoteEntry remote, string downloadedPath)
+    public VerificationSummary VerifyDownload(RemoteEntry remote, string downloadedPath)
     {
         var info = new FileInfo(downloadedPath);
         if (!info.Exists)
-            throw new SyncException($"download did not produce a file: {downloadedPath}");
+            throw Fail("size", $"download did not produce a file: {downloadedPath}");
         if (info.Length != remote.Size)
         {
-            throw new SyncException(
+            throw Fail("size",
                 $"verification failed for '{remote.Path}': downloaded size {info.Length} != remote size {remote.Size}");
         }
 
         if (string.IsNullOrEmpty(remote.Sha1))
-            return;
+            return new VerificationSummary("size", "ok");
 
         var localSha1 = ContentHash.ComputeSha1(downloadedPath);
         if (!string.Equals(localSha1, remote.Sha1, StringComparison.OrdinalIgnoreCase))
         {
-            throw new SyncException(
+            throw Fail("size+sha1",
                 $"verification failed for '{remote.Path}': downloaded SHA-1 {localSha1} != remote claim {remote.Sha1}");
         }
+
+        return new VerificationSummary("size+sha1", "ok");
     }
+
+    private static VerificationException Fail(
+        string method,
+        string message,
+        bool downloadBack = false) =>
+        new(new VerificationSummary(method, "failed", downloadBack, message));
 }

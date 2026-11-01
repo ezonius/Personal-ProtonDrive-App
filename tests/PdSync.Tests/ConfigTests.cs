@@ -338,6 +338,25 @@ public sealed class ConfigTests : IDisposable
     }
 
     [Fact]
+    public void LogDirInsideLocalRoot_IsAnError()
+    {
+        Directory.CreateDirectory(_temp.Combine("local"));
+
+        var yaml = $"""
+            version: 1
+            stateDir: "{_temp.YamlPath("state")}"
+            logDir: "{_temp.YamlPath("local", "logs")}"
+            syncs:
+              docs:
+                local: "{_temp.YamlPath("local")}"
+                remote: "/my-files/docs"
+            """;
+
+        var ex = Assert.Throws<ConfigException>(() => Load(yaml));
+        ex.Message.Should().Contain("logDir");
+    }
+
+    [Fact]
     public void PerSyncOverrides_InheritUnspecifiedValues()
     {
         var yaml = ConfigTestHelper.MinimalYaml(

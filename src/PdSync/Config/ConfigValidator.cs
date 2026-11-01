@@ -83,7 +83,7 @@ public static class ConfigValidator
         if (raw.Syncs is null || raw.Syncs.Count == 0)
             errors.Add("syncs: at least one sync is required");
 
-        ValidateOverlaps(syncs, stateDir, errors);
+        ValidateOverlaps(syncs, stateDir, logDir, errors);
 
         if (errors.Count > 0)
             throw new ConfigException(errors.Distinct(StringComparer.Ordinal));
@@ -367,13 +367,19 @@ public static class ConfigValidator
         }
     }
 
-    private static void ValidateOverlaps(List<SyncConfig> syncs, string stateDir, List<string> errors)
+    private static void ValidateOverlaps(
+        List<SyncConfig> syncs,
+        string stateDir,
+        string logDir,
+        List<string> errors)
     {
         for (var i = 0; i < syncs.Count; i++)
         {
             var a = syncs[i];
             if (PathUtil.IsSameOrUnder(stateDir, a.LocalRoot))
                 errors.Add($"stateDir: must not be inside local root of sync '{a.Name}' ({a.LocalRoot})");
+            if (PathUtil.IsSameOrUnder(logDir, a.LocalRoot))
+                errors.Add($"logDir: must not be inside local root of sync '{a.Name}' ({a.LocalRoot})");
 
             for (var j = i + 1; j < syncs.Count; j++)
             {

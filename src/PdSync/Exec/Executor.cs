@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Globalization;
 using System.Text.Json;
 using PdSync.Config;
@@ -9,7 +10,18 @@ using PdSync.State;
 
 namespace PdSync.Exec;
 
-public sealed record ActionOutcome(PlanAction Action, bool Success, string? Error = null);
+public sealed record ActionOutcome(
+    PlanAction Action,
+    bool Success,
+    string? Error = null,
+    long DurationMs = 0,
+    VerificationSummary? Verification = null,
+    string? Outcome = null)
+{
+    public string Status => Outcome ?? (Success
+        ? "ok"
+        : Error?.StartsWith("skipped", StringComparison.Ordinal) == true ? "skipped" : "failed");
+}
 
 public sealed class ExecutionReport
 {
@@ -26,8 +38,9 @@ public sealed class ExecutionReport
     public IReadOnlyList<ActionOutcome> Outcomes { get; }
     public IReadOnlyList<PlanAdoption> Adoptions { get; }
     public IReadOnlyList<string> PrunedRemoteDirectories { get; }
-    public int Failed => Outcomes.Count(o => !o.Success);
-    public int Succeeded => Outcomes.Count(o => o.Success);
+    public int Failed => Outcomes.Count(o => o.Status == "failed");
+    public int Succeeded => Outcomes.Count(o => o.Status == "ok");
+    public int Skipped => Outcomes.Count(o => o.Status == "skipped");
 }
 
 /// <summary>
@@ -49,12 +62,14 @@ public sealed class Executor
     private readonly long _runId;
     private readonly TextWriter _output;
     private readonly bool _verbose;
+    private readonly RunLogger? _log;
     private readonly LocalTrashStore _trash;
     private readonly Verifier _verifier;
     private readonly string _stagingRoot;
     private readonly List<string> _failedPrefixes = new();
     private readonly HashSet<string> _failedKeys = new(StringComparer.Ordinal);
     private readonly List<string> _pruned = new();
+    private readonly List<ActionOutcome> _outcomes = new();
 
     public Executor(
         PdsyncConfig config,
@@ -67,7 +82,8 @@ public sealed class Executor
         PlanResult plan,
         long runId,
         TextWriter output,
-        bool verbose)
+        bool verbose,
+        RunLogger? log = null)
     {
         _config = config;
         _sync = sync;
@@ -81,14 +97,21 @@ public sealed class Executor
         _runId = runId;
         _output = output;
         _verbose = verbose;
+        _log = log;
         _trash = new LocalTrashStore(config, sync, runId);
         _verifier = new Verifier(cli, sync.Options.Verify);
         _stagingRoot = Path.Combine(config.StateDir, "tmp", runId.ToString(CultureInfo.InvariantCulture));
     }
 
+    /// <summary>Outcomes recorded so far, even when <see cref="Execute"/> throws.</summary>
+    public IReadOnlyList<ActionOutcome> PartialOutcomes => _outcomes;
+
+    /// <summary>Remote directories pruned so far, even when <see cref="Execute"/> throws.</summary>
+    public IReadOnlyList<string> PartialPrunedRemoteDirectories => _pruned;
+
     public ExecutionReport Execute(CancellationToken cancellationToken = default)
     {
-        var outcomes = new List<ActionOutcome>();
+        var outcomes = _outcomes;
 
         try
         {
@@ -101,31 +124,52 @@ public sealed class Executor
                                                    action.PathKey.StartsWith(prefix, StringComparison.Ordinal)) ||
                      _failedKeys.Contains(action.PathKey)))
                 {
-                    outcomes.Add(new ActionOutcome(action, false, "skipped: an earlier action failed"));
+                    Record(outcomes, new ActionOutcome(action, false,
+                        "skipped: an earlier action failed", Outcome: "skipped"));
                     continue;
                 }
 
                 if (action.Kind != PlanActionKind.DropBase && _failedKeys.Contains(action.PathKey))
                 {
-                    outcomes.Add(new ActionOutcome(action, false, "skipped: an earlier action for this path failed"));
+                    Record(outcomes, new ActionOutcome(action, false,
+                        "skipped: an earlier action for this path failed", Outcome: "skipped"));
                     continue;
                 }
 
+                var stopwatch = Stopwatch.StartNew();
                 try
                 {
-                    ExecuteOne(action, outcomes);
+                    var verification = ExecuteOne(action);
+                    stopwatch.Stop();
+                    Record(outcomes, new ActionOutcome(action, true,
+                        DurationMs: stopwatch.ElapsedMilliseconds, Verification: verification));
+                    if (_verbose)
+                        _output.WriteLine($"ok     {Describe(action)}");
                 }
-                catch (ProtonAuthException)
+                catch (ProtonAuthException ex)
                 {
+                    stopwatch.Stop();
+                    Record(outcomes, new ActionOutcome(action, false, ex.Message,
+                        stopwatch.ElapsedMilliseconds));
+                    _failedKeys.Add(action.PathKey);
+                    if (action.IsDelete)
+                        _failedPrefixes.Add(action.PathKey + "/");
+                    _output.WriteLine($"FAILED {Describe(action)}: {ex.Message}");
                     throw;
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException ex)
                 {
+                    stopwatch.Stop();
+                    Record(outcomes, new ActionOutcome(action, false,
+                        "cancelled: " + ex.Message, stopwatch.ElapsedMilliseconds));
                     throw;
                 }
                 catch (Exception ex)
                 {
-                    outcomes.Add(new ActionOutcome(action, false, ex.Message));
+                    stopwatch.Stop();
+                    Record(outcomes, new ActionOutcome(action, false, ex.Message,
+                        stopwatch.ElapsedMilliseconds,
+                        (ex as VerificationException)?.Verification));
                     _failedKeys.Add(action.PathKey);
                     if (action.IsDelete)
                         _failedPrefixes.Add(action.PathKey + "/");
@@ -135,16 +179,27 @@ public sealed class Executor
 
             foreach (var adoption in _plan.Adoptions)
             {
+                var stopwatch = Stopwatch.StartNew();
                 try
                 {
                     Adopt(adoption);
+                    stopwatch.Stop();
+                    outcomes.Add(new ActionOutcome(
+                        new PlanAction(PlanActionKind.DropBase, adoption.Path, adoption.PathKey,
+                            Reason: "adoption"),
+                        true, DurationMs: stopwatch.ElapsedMilliseconds));
+                    _log?.Action("Adopt", adoption.Path, adoption.PathKey, null,
+                        "ok", stopwatch.ElapsedMilliseconds);
                 }
                 catch (Exception ex)
                 {
+                    stopwatch.Stop();
                     outcomes.Add(new ActionOutcome(
                         new PlanAction(PlanActionKind.DropBase, adoption.Path, adoption.PathKey,
                             Reason: "adoption"),
                         false, ex.Message));
+                    _log?.Action("Adopt", adoption.Path, adoption.PathKey, null,
+                        "failed", stopwatch.ElapsedMilliseconds, ex.Message);
                     _output.WriteLine($"FAILED adopt {adoption.Path}: {ex.Message}");
                 }
             }
@@ -164,21 +219,20 @@ public sealed class Executor
         return new ExecutionReport(outcomes, _plan.Adoptions, _pruned);
     }
 
-    private void ExecuteOne(PlanAction action, List<ActionOutcome> outcomes)
+    private VerificationSummary? ExecuteOne(PlanAction action)
     {
         var pending = _state.AddPending(action.Kind.ToString(), action.Path,
             JsonSerializer.Serialize(action));
         try
         {
+            VerificationSummary? verification = null;
             _state.InTransaction(() =>
             {
-                ExecuteAction(action);
+                verification = ExecuteAction(action);
                 ApplyState(action);
                 _state.RemovePending(pending);
             });
-            outcomes.Add(new ActionOutcome(action, true));
-            if (_verbose)
-                _output.WriteLine($"ok     {Describe(action)}");
+            return verification;
         }
         catch (OperationCanceledException)
         {
@@ -192,44 +246,42 @@ public sealed class Executor
         }
     }
 
-    private void ExecuteAction(PlanAction action)
+    private VerificationSummary? ExecuteAction(PlanAction action)
     {
         switch (action.Kind)
         {
             case PlanActionKind.CreateRemoteDirectory:
                 CreateRemoteDirectory(action);
-                break;
+                return null;
             case PlanActionKind.CreateLocalDirectory:
                 CreateLocalDirectory(action);
-                break;
+                return null;
             case PlanActionKind.DownloadCreate:
             case PlanActionKind.DownloadReplace:
             case PlanActionKind.DownloadRestore:
-                Download(action);
-                break;
+                return Download(action);
             case PlanActionKind.LocalConflictRename:
                 RenameLocal(action.Path, action.SecondaryPath
                     ?? throw new SyncException("conflict rename has no target"));
-                break;
+                return null;
             case PlanActionKind.UploadCreate:
             case PlanActionKind.UploadRevision:
             case PlanActionKind.KeepBothUpload:
-                Upload(action);
-                break;
+                return Upload(action);
             case PlanActionKind.RemoteMove:
                 MoveRemote(action);
-                break;
+                return null;
             case PlanActionKind.LocalMove:
                 MoveLocal(action);
-                break;
+                return null;
             case PlanActionKind.LocalTrash:
                 TrashLocal(action);
-                break;
+                return null;
             case PlanActionKind.RemoteTrash:
                 TrashRemote(action);
-                break;
+                return null;
             case PlanActionKind.DropBase:
-                break;
+                return null;
             default:
                 throw new SyncException($"unsupported action: {action.Kind}");
         }
@@ -251,7 +303,7 @@ public sealed class Executor
         StateSet(action.Path, EntryKind.Folder, StatLocal(action.Path), remote: remote);
     }
 
-    private void Upload(PlanAction action)
+    private VerificationSummary Upload(PlanAction action)
     {
         var localFull = LocalFull(action.Path);
         if (!File.Exists(localFull))
@@ -287,8 +339,9 @@ public sealed class Executor
                 !string.Equals(Path.GetFileName(uploadPath), remoteName, StringComparison.Ordinal))
                 _cli.Rename(RemoteFull(parent) + "/" + Path.GetFileName(uploadPath), remoteName);
 
-            var node = _verifier.VerifyUpload(RemoteFull(parent), remoteName, uploadPath);
+            var (node, verification) = _verifier.VerifyUpload(RemoteFull(parent), remoteName, uploadPath);
             StateSet(action.Path, EntryKind.File, StatLocal(action.Path), node: node);
+            return verification;
         }
         finally
         {
@@ -297,7 +350,7 @@ public sealed class Executor
         }
     }
 
-    private void Download(PlanAction action)
+    private VerificationSummary Download(PlanAction action)
     {
         var remote = _remote.GetByUid(action.RemoteUid) ?? _remote.Get(action.PathKey)
             ?? throw new SyncException($"remote entry is missing for {action.Path}");
@@ -317,7 +370,7 @@ public sealed class Executor
                 : throw new SyncException($"download did not produce exactly one file for {action.Path}");
         }
 
-        _verifier.VerifyDownload(remote, downloaded);
+        var verification = _verifier.VerifyDownload(remote, downloaded);
 
         var destination = LocalFull(action.Path);
         var destinationDirectory = Path.GetDirectoryName(destination);
@@ -329,6 +382,7 @@ public sealed class Executor
 
         FileSystemUtil.MoveFile(downloaded, destination, overwrite: true);
         StateSet(action.Path, EntryKind.File, StatLocal(action.Path), remote: remote);
+        return verification;
     }
 
     private void MoveRemote(PlanAction action)
@@ -465,7 +519,7 @@ public sealed class Executor
         }
         catch (Exception ex) when (ex is not ProtonAuthException)
         {
-            outcomes.Add(new ActionOutcome(
+            Record(outcomes, new ActionOutcome(
                 new PlanAction(PlanActionKind.RemoteTrash, string.Empty, string.Empty,
                     Reason: "prune empty remote directories"),
                 false, ex.Message));
@@ -494,6 +548,7 @@ public sealed class Executor
                 continue;
 
             var pending = _state.AddPending("PruneRemoteDirectory", folder.Path);
+            var stopwatch = Stopwatch.StartNew();
             try
             {
                 _state.InTransaction(() =>
@@ -504,9 +559,11 @@ public sealed class Executor
                 });
                 removed.Add(key);
                 _pruned.Add(folder.Path);
-                outcomes.Add(new ActionOutcome(
+                stopwatch.Stop();
+                Record(outcomes, new ActionOutcome(
                     new PlanAction(PlanActionKind.RemoteTrash, folder.Path, key,
-                        Reason: "prune empty remote directory"), true));
+                        Reason: "prune empty remote directory"), true,
+                    DurationMs: stopwatch.ElapsedMilliseconds));
                 if (_verbose)
                     _output.WriteLine($"ok     prune empty remote dir {folder.Path}");
             }
@@ -517,9 +574,11 @@ public sealed class Executor
             catch (Exception ex)
             {
                 try { _state.RemovePending(pending); } catch { /* best effort */ }
-                outcomes.Add(new ActionOutcome(
+                stopwatch.Stop();
+                Record(outcomes, new ActionOutcome(
                     new PlanAction(PlanActionKind.RemoteTrash, folder.Path, key,
-                        Reason: "prune empty remote directory"), false, ex.Message));
+                        Reason: "prune empty remote directory"), false, ex.Message,
+                    DurationMs: stopwatch.ElapsedMilliseconds));
                 _output.WriteLine($"FAILED prune {folder.Path}: {ex.Message}");
             }
         }
@@ -665,6 +724,20 @@ public sealed class Executor
     private static string Describe(PlanAction action) =>
         action.Kind + " " + action.Path +
         (action.SecondaryPath is null ? string.Empty : " -> " + action.SecondaryPath);
+
+    private void Record(List<ActionOutcome> outcomes, ActionOutcome outcome)
+    {
+        outcomes.Add(outcome);
+        _log?.Action(
+            outcome.Action.Kind.ToString(),
+            outcome.Action.Path,
+            outcome.Action.PathKey,
+            outcome.Action.SecondaryPath,
+            outcome.Status,
+            outcome.DurationMs,
+            outcome.Error,
+            outcome.Verification);
+    }
 
     private static void TryDeleteDirectory(string path)
     {

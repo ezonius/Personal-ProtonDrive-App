@@ -167,7 +167,8 @@ public static class CliApp
             {
                 var attempt = SyncService.Run(
                     config, sync, args.Fast || sync.Options.Fast, args.Full,
-                    args.Force, args.Interactive, args.Verbose, output);
+                    args.Force, args.Interactive, args.Verbose,
+                    args.Json ? TextWriter.Null : output, error);
 
                 if (!args.Json)
                     WriteRun(output, sync, attempt);
@@ -182,6 +183,8 @@ public static class CliApp
                     stats = attempt.Plan.Stats,
                     succeeded = attempt.Report?.Succeeded ?? 0,
                     failed = attempt.Report?.Failed ?? 0,
+                    skipped = attempt.Report?.Skipped ?? 0,
+                    durationMs = attempt.DurationMs,
                     prunedRemoteDirectories = attempt.Report?.PrunedRemoteDirectories ?? Array.Empty<string>(),
                 });
 
@@ -395,7 +398,8 @@ public static class CliApp
     {
         output.WriteLine(
             $"run {sync.Name}: planned {attempt.Plan.Stats.Actions}, " +
-            $"succeeded {attempt.Report?.Succeeded ?? 0}, failed {attempt.Report?.Failed ?? 0}");
+            $"succeeded {attempt.Report?.Succeeded ?? 0}, failed {attempt.Report?.Failed ?? 0}, " +
+            $"skipped {attempt.Report?.Skipped ?? 0} in {attempt.DurationMs} ms");
         if (attempt.Report is null)
         {
             foreach (var conflict in attempt.Plan.Conflicts.Where(c => c.Resolution == PlanResolution.Abort))

@@ -9,6 +9,10 @@ namespace PdSync.Exec;
 /// plus the guarded delete used by <c>pdsync trash purge</c>. Nothing here opens
 /// the state DB, takes the run lock, calls Proton, or creates directories
 /// (SPEC §7, D11).
+///
+/// Safety is real-path based: the trash root, every sync-id directory, every
+/// run directory, and every entry inside a run tree are checked for reparse
+/// points (junctions/symlinks) before anything is measured or deleted.
 /// </summary>
 public static class LocalTrashIndex
 {
@@ -22,6 +26,13 @@ public static class LocalTrashIndex
         bool Active,
         string Path);
 
+    /// <summary>A trash entry that was refused before it could be measured or deleted.</summary>
+    public sealed record TrashSkip(string SyncId, long? RunId, string Path, string Reason);
+
+    public sealed record TrashScanResult(
+        IReadOnlyList<TrashRun> Runs,
+        IReadOnlyList<TrashSkip> Skipped);
+
     public static string TrashRoot(PdsyncConfig config) =>
         PathUtil.TrimEnd(Path.GetFullPath(Path.Combine(config.StateDir, "trash")));
 
@@ -29,15 +40,25 @@ public static class LocalTrashIndex
     /// Lists run directories under the configured trash root. When
     /// <paramref name="syncIds"/> is non-null, only those sync ids are returned.
     /// Missing trash/state directories produce an empty list; they are never
-    /// created.
+    /// created. Directories whose real path leaves the trash root, or whose tree
+    /// contains a reparse point, are returned in <see cref="TrashScanResult.Skipped"/>
+    /// instead of being measured.
     /// </summary>
-    public static IReadOnlyList<TrashRun> Scan(PdsyncConfig config, IReadOnlySet<string>? syncIds = null)
+    public static TrashScanResult Scan(PdsyncConfig config, IReadOnlySet<string>? syncIds = null)
     {
         var trashRoot = TrashRoot(config);
-        if (!Directory.Exists(trashRoot))
-            return Array.Empty<TrashRun>();
-
         var runs = new List<TrashRun>();
+        var skipped = new List<TrashSkip>();
+
+        if (!Directory.Exists(trashRoot))
+            return new TrashScanResult(runs, skipped);
+
+        // The root itself must not be a link to somewhere else. Refuse the whole
+        // scan rather than reporting or deleting through it.
+        var rootReason = CheckDirectorySafety(trashRoot, trashRoot);
+        if (rootReason is not null)
+            throw new SafetyException($"trash: refusing trash root '{trashRoot}': {rootReason}");
+
         foreach (var syncDir in SafeEnumerateDirectories(trashRoot))
         {
             var syncId = Path.GetFileName(syncDir);
@@ -45,6 +66,15 @@ public static class LocalTrashIndex
                 continue;
             if (syncIds is not null && !syncIds.Contains(syncId))
                 continue;
+
+            // Never enumerate through a sync-id junction: doing so would list or
+            // delete files outside the trash root.
+            var syncReason = CheckDirectorySafety(syncDir, trashRoot);
+            if (syncReason is not null)
+            {
+                skipped.Add(new TrashSkip(syncId, null, syncDir, syncReason));
+                continue;
+            }
 
             var active = IsSyncActive(config, syncId);
             foreach (var runDir in SafeEnumerateDirectories(syncDir))
@@ -61,8 +91,9 @@ public static class LocalTrashIndex
                 {
                     resolved = ResolveRunDirectory(trashRoot, syncId, runName);
                 }
-                catch (SafetyException)
+                catch (SafetyException ex)
                 {
+                    skipped.Add(new TrashSkip(syncId, runId, runDir, Describe(ex)));
                     continue;
                 }
 
@@ -90,12 +121,15 @@ public static class LocalTrashIndex
             var bySync = string.CompareOrdinal(left.SyncId, right.SyncId);
             return bySync != 0 ? bySync : left.RunId.CompareTo(right.RunId);
         });
-        return runs;
+        return new TrashScanResult(runs, skipped);
     }
 
     /// <summary>
     /// Returns the canonical path for a run directory and refuses anything that
     /// is not exactly <c>&lt;trashRoot&gt;/&lt;syncId&gt;/&lt;runId&gt;</c>.
+    /// Existing directories are checked for reparse points and real-path
+    /// containment; an existing run tree is preflighted for nested reparse
+    /// points before it can be measured or deleted.
     /// </summary>
     public static string ResolveRunDirectory(string trashRoot, string syncId, string runId)
     {
@@ -121,13 +155,22 @@ public static class LocalTrashIndex
                 $"trash: refusing path outside the trash root: {candidate}");
         }
 
+        ValidateExistingDirectory(root, root, "trash root");
+        var syncDirectory = Path.Combine(root, syncId);
+        ValidateExistingDirectory(syncDirectory, root, $"trash sync directory '{syncId}'");
+        ValidateExistingDirectory(candidate, root, $"trash run directory '{runId}'");
+
+        if (Directory.Exists(candidate))
+            PreflightTree(candidate);
+
         return PathUtil.TrimEnd(candidate);
     }
 
     /// <summary>
-    /// Deletes one whole run directory. The path is re-validated against the
-    /// trash root immediately before deletion; individual files are never
-    /// deleted, and reparse points inside the tree abort the delete.
+    /// Deletes one whole run directory. The path and its complete tree are
+    /// re-validated immediately before deletion: every ancestor and every entry
+    /// must be free of reparse points, and the tree is preflighted in full before
+    /// the first byte is removed.
     /// </summary>
     public static void DeleteRun(PdsyncConfig config, TrashRun run)
     {
@@ -138,10 +181,8 @@ public static class LocalTrashIndex
         if (!Directory.Exists(resolved))
             return;
 
-        var attributes = File.GetAttributes(resolved);
-        if ((attributes & FileAttributes.ReparsePoint) != 0)
-            throw new SafetyException($"trash: refusing to purge reparse point: {resolved}");
-
+        // Two-phase delete: the whole tree was already preflighted by
+        // ResolveRunDirectory. Delete only after that succeeded.
         DeleteTree(resolved);
     }
 
@@ -153,6 +194,95 @@ public static class LocalTrashIndex
     {
         var lockPath = Path.Combine(config.StateDir, "locks", syncId + ".lock");
         return File.Exists(lockPath);
+    }
+
+    private static void ValidateExistingDirectory(string path, string trashRoot, string label)
+    {
+        var reason = CheckDirectorySafety(path, trashRoot);
+        if (reason is not null)
+            throw new SafetyException($"trash: refusing {label} '{path}': {reason}");
+    }
+
+    /// <summary>
+    /// Returns a refusal reason when an existing directory is a reparse point or
+    /// resolves outside <paramref name="trashRoot"/>; null when it is safe or
+    /// absent.
+    /// </summary>
+    private static string? CheckDirectorySafety(string path, string trashRoot)
+    {
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return "unreadable";
+        }
+
+        if ((attributes & FileAttributes.ReparsePoint) != 0)
+            return "reparse point";
+
+        var info = new DirectoryInfo(path);
+        if (info.LinkTarget is not null)
+            return "reparse point";
+
+        var target = info.ResolveLinkTarget(returnFinalTarget: true);
+        var resolved = target is null ? Path.GetFullPath(path) : Path.GetFullPath(target.FullName);
+        if (!PathUtil.IsSameOrUnder(resolved, Path.GetFullPath(trashRoot)))
+            return "resolves outside the trash root";
+
+        return null;
+    }
+
+    /// <summary>
+    /// Walks the complete run tree and throws before any deletion if any entry is
+    /// a reparse point or cannot be read. A reparse point is never traversed.
+    /// </summary>
+    private static void PreflightTree(string runDirectory)
+    {
+        var pending = new Stack<string>();
+        pending.Push(runDirectory);
+
+        while (pending.Count > 0)
+        {
+            var directory = pending.Pop();
+            string[] entries;
+            try
+            {
+                entries = Directory.GetFileSystemEntries(directory);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                throw new SafetyException($"trash: refusing unreadable trash directory '{directory}': {ex.Message}");
+            }
+
+            foreach (var entry in entries)
+            {
+                FileAttributes attributes;
+                try
+                {
+                    attributes = File.GetAttributes(entry);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    throw new SafetyException($"trash: refusing unreadable trash entry '{entry}': {ex.Message}");
+                }
+
+                var info = (attributes & FileAttributes.Directory) != 0
+                    ? (FileSystemInfo)new DirectoryInfo(entry)
+                    : new FileInfo(entry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0 || info.LinkTarget is not null)
+                    throw new SafetyException($"trash: refusing nested reparse point: {entry}");
+
+                if ((attributes & FileAttributes.Directory) != 0)
+                    pending.Push(entry);
+            }
+        }
     }
 
     private static void DeleteTree(string directory)
@@ -175,9 +305,12 @@ public static class LocalTrashIndex
     private static DateTimeOffset CreatedAt(string runDirectory)
     {
         var created = Directory.GetCreationTimeUtc(runDirectory);
-        if (created.Year < 1980)
-            created = Directory.GetLastWriteTimeUtc(runDirectory);
-        return new DateTimeOffset(created, TimeSpan.Zero);
+        var lastWrite = Directory.GetLastWriteTimeUtc(runDirectory);
+        var now = DateTime.UtcNow;
+        var effective = created.Year >= 1980 && created <= now.AddDays(1)
+            ? (created < lastWrite ? created : lastWrite)
+            : lastWrite;
+        return new DateTimeOffset(effective, TimeSpan.Zero);
     }
 
     private static bool HasReadableManifest(string runDirectory)
@@ -199,7 +332,8 @@ public static class LocalTrashIndex
 
     /// <summary>
     /// Counts trashed files and bytes. The per-run <c>manifest.json</c> is
-    /// metadata and is not counted; nested reparse points are not traversed.
+    /// metadata and is not counted. The tree was preflighted, so no reparse
+    /// point is traversed here.
     /// </summary>
     private static (long FileCount, long Bytes) Measure(string runDirectory)
     {
@@ -259,6 +393,14 @@ public static class LocalTrashIndex
         {
             return Array.Empty<string>();
         }
+    }
+
+    private static string Describe(SafetyException exception)
+    {
+        const string prefix = "trash: ";
+        return exception.Message.StartsWith(prefix, StringComparison.Ordinal)
+            ? exception.Message[prefix.Length..]
+            : exception.Message;
     }
 
     private static bool IsValidSegment(string value) =>

@@ -598,7 +598,7 @@ public static class CliApp
         TextWriter output,
         TextWriter error) =>
         args.Subcommand == "list"
-            ? TrashCommand.ExecuteList(config, args.SyncNames, args.Json, output)
+            ? TrashCommand.ExecuteList(config, args.SyncNames, args.Json, output, error)
             : TrashCommand.ExecutePurge(
                 config, args.SyncNames, args.OlderThanDays!.Value, args.DryRun,
                 args.Yes, args.Json, input, output, error);

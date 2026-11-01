@@ -44,36 +44,51 @@ public static class TrashCommand
         PdsyncConfig config,
         IReadOnlyList<string> syncNames,
         bool json,
-        TextWriter output)
+        TextWriter output,
+        TextWriter error)
     {
-        var runs = LocalTrashIndex.Scan(config, ResolveSyncIds(config, syncNames));
+        var scan = LocalTrashIndex.Scan(config, ResolveSyncIds(config, syncNames));
+        var runs = scan.Runs;
         if (json)
         {
             WriteJson(output, runs.Select(run => new ListJsonRow(
                 run.SyncId, run.RunId, run.CreatedAt, run.FileCount, run.Bytes, run.HasManifest)));
+            // Keep stdout a stable JSON array; unsafe entries are diagnostics on
+            // stderr rather than silently copied into the inventory.
+            WriteSkips(scan.Skipped, error);
             return 0;
         }
 
         if (runs.Count == 0)
-        {
             output.WriteLine("trash: no local trash runs");
-            return 0;
+        else
+        {
+            var names = SyncNamesById(config);
+            output.WriteLine($"trash: {runs.Count} run(s) under {LocalTrashIndex.TrashRoot(config)}");
+            foreach (var run in runs)
+            {
+                var name = names.TryGetValue(run.SyncId, out var configured) ? $" ({configured})" : string.Empty;
+                output.WriteLine(
+                    $"  sync {run.SyncId}{name} run {run.RunId}  " +
+                    $"{run.CreatedAt:yyyy-MM-ddTHH:mm:ssZ}  " +
+                    $"{run.FileCount} file(s), {run.Bytes} bytes, " +
+                    $"manifest: {(run.HasManifest ? "yes" : "no")}" +
+                    (run.Active ? "  (active run, purge will skip)" : string.Empty));
+                output.WriteLine($"    {run.Path}");
+            }
         }
 
-        var names = SyncNamesById(config);
-        output.WriteLine($"trash: {runs.Count} run(s) under {LocalTrashIndex.TrashRoot(config)}");
-        foreach (var run in runs)
-        {
-            var name = names.TryGetValue(run.SyncId, out var configured) ? $" ({configured})" : string.Empty;
-            output.WriteLine(
-                $"  sync {run.SyncId}{name} run {run.RunId}  " +
-                $"{run.CreatedAt:yyyy-MM-ddTHH:mm:ssZ}  " +
-                $"{run.FileCount} file(s), {run.Bytes} bytes, " +
-                $"manifest: {(run.HasManifest ? "yes" : "no")}" +
-                (run.Active ? "  (active run, purge will skip)" : string.Empty));
-            output.WriteLine($"    {run.Path}");
-        }
+        WriteSkips(scan.Skipped, output);
         return 0;
+    }
+
+    private static void WriteSkips(IReadOnlyList<LocalTrashIndex.TrashSkip> skips, TextWriter output)
+    {
+        foreach (var skip in skips)
+        {
+            var run = skip.RunId is null ? string.Empty : $" run {skip.RunId}";
+            output.WriteLine($"  skip unsafe sync {skip.SyncId}{run}  {skip.Path}  ({skip.Reason})");
+        }
     }
 
     public static int ExecutePurge(
@@ -89,7 +104,14 @@ public static class TrashCommand
     {
         var now = DateTimeOffset.UtcNow;
         var cutoff = now.AddDays(-olderThanDays);
-        var runs = LocalTrashIndex.Scan(config, ResolveSyncIds(config, syncNames));
+        var scan = LocalTrashIndex.Scan(config, ResolveSyncIds(config, syncNames));
+        if (scan.Skipped.Count > 0)
+        {
+            var details = string.Join("; ", scan.Skipped.Select(skip => $"{skip.Path} ({skip.Reason})"));
+            throw new SafetyException($"trash: refusing to purge unsafe trash entries: {details}");
+        }
+
+        var runs = scan.Runs;
 
         var eligible = runs
             .Where(run => !run.Active && run.CreatedAt < cutoff)

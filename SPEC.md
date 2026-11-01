@@ -123,7 +123,10 @@ sync ids that no longer match a configured sync) or only the ids selected by
 `--sync`. `--json` prints a top-level array of
 `{syncId, runId, createdAt, fileCount, bytes, hasManifest}`; `fileCount` and
 `bytes` exclude the per-run `manifest.json`, and `hasManifest` is false when the
-manifest is missing or unreadable. `trash purge` deletes whole run directories
+manifest is missing or unreadable. Entries whose real path leaves the trash root
+or whose tree contains a reparse point are never measured or reported as runs;
+they are listed as `skip unsafe ...` on stderr (`--json` keeps stdout a plain
+array) or in human output. `trash purge` deletes whole run directories
 only, requires `--older-than <days>` and an interactive yes unless `--yes`,
 and never touches files outside `<stateDir>/trash`. A run directory whose sync
 lock file exists is reported as skipped, not deleted; stale locks are never
@@ -817,12 +820,21 @@ Purge rules:
   candidate is canonicalized and re-validated against the trash root
   immediately before deletion; invalid ids, `..`, rooted segments, and any
   path that resolves outside the root are refused with the safety exit (6).
-- Only whole run directories are deleted. Individual files are never removed,
-  and a run directory containing a reparse point is refused rather than
-  traversed.
-- A run directory is eligible when its creation time is older than
-  `--older-than <days>` (cutoff `now - days`). It is purgeable even when its
-  manifest is missing or unreadable, but `trash list` reports
+- Real-path containment is enforced, not just lexical containment. The trash
+  root, each sync-id directory, each run directory, and every entry inside the
+  run tree must be free of reparse points (junctions/symlinks), and resolved
+  link targets must stay under the resolved trash root. A contaminated
+  sync-id directory aborts purge before any deletion and is reported by
+  `trash list` as `skip unsafe ...` rather than being traversed.
+- Only whole run directories are deleted. Individual files are never removed.
+  Deletion is two-phase: the complete run tree is preflighted first, and any
+  nested reparse point (or unreadable entry) aborts the entire purge with exit
+  6 before a single file is deleted.
+- A run directory is eligible when its age is older than
+  `--older-than <days>` (cutoff `now - days`). Age is the earlier of creation
+  time and last-write time when creation time is plausible, with last-write as
+  the fallback on filesystems without a usable birth time. A run is purgeable
+  even when its manifest is missing or unreadable, but `trash list` reports
   `hasManifest: false` distinctly.
 - If `<stateDir>/locks/<syncId>.lock` exists, every run for that sync is
   reported as skipped (`active-run-lock`) and left in place. A stale lock must

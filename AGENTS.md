@@ -55,6 +55,8 @@ and `status` are implemented; `init`, `ignore`, `history`, and `rebuild` are not
 src/PdSync/
   Program.cs                 entry point -> CliApp.Run
   Cli/CliApp.cs              argument parsing, command handlers, human/JSON output
+  Diagnostics/
+    DesktopMappingDetector.cs  read-only Proton Drive desktop-app Mappings.json probe
   Config/
     ConfigModel.cs           raw YAML DTOs + normalized records/enums
     ConfigLoader.cs          discovery, strict YAML, duplicate/unknown-key rejection
@@ -186,7 +188,7 @@ parallelism is otherwise disabled in the assembly/test setup.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 
 Prefer behavior assertions over implementation details. The current suite is
-**184 tests**.
+**203 tests**.
 
 ---
 
@@ -266,6 +268,10 @@ Implemented and fake-tested:
 - Executor: uploads/downloads, staging, verification, state commits, pending
   journal, local trash, Proton Trash, pruning, safety budgets, lock.
 - Fast/full mode and tracker.
+- `doctor` desktop-app mapping detection: reads `Mappings.json` best-effort,
+  reports every distinct exact/ancestor/descendant overlap with configured
+  local roots, and treats missing, malformed, or schema-drifted files as
+  non-fatal warnings (the mapping probe itself does not touch the state DB).
 
 Live smoke: **passed** on 2026-10-31 against the real account using the script
 in §5. It covered push, pull, both deletion directions, ignore behavior, and
@@ -284,7 +290,9 @@ Known gaps / likely next work:
   non-interactive fallback.
 - S15 restore-by-UID is not wired (restore is not used by the sync engine yet).
 - Directory rename detection is not implemented; file renames are.
-- Desktop Proton Drive app mapping detection is not implemented.
+- Desktop-app mapping detection is implemented for the Windows desktop app's
+  known per-user/machine-wide `Mappings.json` locations; other platforms are a
+  no-op because the app does not publish that file there.
 
 When adding a feature, update `SPEC.md` if it changes a contract, then add or
 adjust focused tests and rerun the build/test commands above. If CLI/executor

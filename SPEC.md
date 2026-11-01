@@ -623,6 +623,39 @@ A failed verification leaves the local file untouched, marks the entry
 `unverified`, and retries the upload next run. A missing digest on a file we just
 uploaded is a verification failure: our CLI always supplies one.
 
+### 6.6 Desktop-app mapping detection
+
+The Proton Drive desktop app can map and sync local folders independently of
+pdsync. Running both engines over the same tree is unsupported. `doctor` reads
+the desktop app's `Mappings.json` **read-only** (when present) and compares each
+mapping's `Local.RootFolderPath` with every configured sync `local` root.
+
+- Windows probes `%LOCALAPPDATA%\Proton\Proton Drive\Mappings.json`, then the
+  equivalent `%APPDATA%` and `%PROGRAMDATA%` locations and two older layouts.
+  The macOS desktop client exists but its mapping-file path and schema have not
+  been verified, so non-Windows detection is a documented best-effort no-op
+  rather than a guessed probe.
+- Parsing is defensive: a missing file means "no mappings"; malformed JSON, an
+  unreadable file, or an unrecognized shape yields no mappings plus a non-fatal
+  `warn` diagnostic. An array whose entries all lack a usable
+  `Local.RootFolderPath` is schema drift, not "no mappings": it is reported as a
+  warning. Entries that are individually skipped produce a partial-schema
+  warning while the usable mappings are still checked. The probe itself never
+  crashes and only reads files.
+- `doctor` as a whole is not write-free: its existing state-DB check may still
+  open or migrate an existing database exactly as before (§7). The mapping probe
+  does not touch the state DB.
+- Overlap is classified with pdsync's identity rules (NFC + case-folded,
+  segment-aware): exact, local root inside a mapping, or mapping inside a local
+  root. Sibling names sharing a string prefix do not overlap. Symlink, junction,
+  and 8.3 short-name aliases are not resolved, so an aliased path can be a false
+  negative.
+- Every distinct overlapping mapping is a doctor problem (exit 1) reported as
+  `sync <name> desktop-app overlap` with the mapping path; duplicate mappings
+  are de-duplicated by identity. JSON output also carries a `desktopMappings`
+  array of detected mapping roots. The additive per-check `warning` field is
+  emitted only when true.
+
 ---
 
 ## 7. State and crash safety
@@ -729,7 +762,9 @@ Non-negotiable, enforced before any destructive action:
 8. Files modified within `settleSeconds` are skipped this run (partial writes,
    editors, downloads); they are picked up next run.
 9. Overlap with a Proton Drive desktop-app mapping is detected in `doctor` and
-   reported as unsupported (read `Mappings.json` if present).
+   reported as unsupported: read `Mappings.json` read-only if present, classify
+   exact/ancestor/descendant overlap, and never fail on a missing or malformed
+   file (§6.6).
 10. Deleting the last copy is impossible by construction: every delete has a
     trash counterpart on the other side, and delete-vs-modify keeps content.
 11. **Case collisions never delete.** If the remote contains two names that
@@ -780,6 +815,8 @@ src/PdSync/
   Program.cs                    # entry point, exit-code mapping
   Cli/
     CliApp.cs                   # plan/run/doctor/status parsing + reporters
+  Diagnostics/
+    DesktopMappingDetector.cs   # read-only desktop-app Mappings.json probe + overlap
   Config/
     ConfigModel.cs              # YAML DTOs + normalized model
     ConfigLoader.cs             # discovery, YAML parse, unknown-key rejection

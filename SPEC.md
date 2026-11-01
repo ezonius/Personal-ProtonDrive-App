@@ -188,7 +188,19 @@ Additional rules specific to sync:
 5. The ignore file itself is synced unless explicitly ignored.
 6. Patterns are evaluated on the **relative POSIX path** with a trailing `/` for
    directories, matching the `ignore` package's contract.
-7. `pdsync ignore <path>` prints the deciding pattern and rule number.
+7. `pdsync ignore <path> [--sync <name>] [--json]` explains the verdict for
+   one path: the deciding pattern, its rule number, whether it came from the
+   ignore file (with line number) or an inline `exclude`, and the matched
+   ancestor directory when an ignored parent is the deciding rule. A trailing
+   `/` or `\` asks for directory intent; without it the path is treated as a
+   file (the filesystem is not probed, so nonexistent paths still explain).
+   Relative paths resolve against the selected sync root; a rooted path resolves
+   against the sync root that contains it. A relative path with more than one
+   enabled sync is a config error asking for `--sync`. The command is strictly
+   read-only: it does not open or create the state DB, take the run lock, write
+   fast counters, or create logs. `--json` emits `command`, `sync`, `root`,
+   `ignoreFile`, `path`, `kind`, `ignored`, `verdict`, `pattern`, `rule`,
+   `source`, `sourceKind`, `line`, and `matchedPath`.
 
 Example `.pdignore`:
 

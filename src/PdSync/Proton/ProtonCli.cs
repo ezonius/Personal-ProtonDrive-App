@@ -449,8 +449,21 @@ public sealed class ProtonCli
     {
         var detail = string.IsNullOrWhiteSpace(result.Stderr) ? result.Stdout : result.Stderr;
         var kind = Classify(result) ?? ProtonFailureKind.Permanent;
+        var message = $"proton-drive exited {result.ExitCode} operating on {target}: {detail.Trim()}";
+        if (kind == ProtonFailureKind.Auth)
+        {
+            return new ProtonAuthException(
+                message,
+                result.Args,
+                result.ExitCode,
+                result.TimedOut,
+                result.Stdout,
+                result.Stderr,
+                result.Attempts);
+        }
+
         return new ProtonCliException(
-            $"proton-drive exited {result.ExitCode} operating on {target}: {detail.Trim()}",
+            message,
             result.Args,
             result.ExitCode,
             result.TimedOut,

@@ -25,6 +25,22 @@ public sealed class CliFakeTests
         fixture.RemoteFiles().Should().BeEmpty();
     }
 
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("run")]
+    public void MalformedIgnoreFile_ReturnsConfigExit4(string command)
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal(".pdignore", "[");
+
+        var result = fixture.Cli(command);
+
+        result.ExitCode.Should().Be(4, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("config:");
+        result.Stderr.Should().Contain("invalid ignore pattern");
+    }
+
     [Fact]
     public void Run_PushesCreatesAndSecondRunIsNoOp()
     {
@@ -422,6 +438,22 @@ public sealed class CliFakeTests
                 return document.RootElement.Clone();
             })
             .ToList();
+
+    [Fact]
+    public void Doctor_VersionAuthFailureReturnsExit3()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "--version", "authExpired": true } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        var result = fixture.Cli("doctor");
+
+        result.ExitCode.Should().Be(3, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("auth:");
+    }
 
     [Fact]
     public void Doctor_ReportsHealthyFake()

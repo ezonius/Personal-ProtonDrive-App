@@ -428,26 +428,25 @@ public static class CliApp
             : null;
         var sourceKind = ruleInfo is null ? null : ruleInfo.LineNumber is null ? "exclude" : "file";
         var matchedPath = decision.Pattern is null ? null : decision.MatchedPath;
+        var matchedAncestor = matchedPath is not null && matchedPath != decision.Path ? matchedPath : null;
 
         if (args.Json)
         {
-            WriteJson(output, new
-            {
-                command = "ignore",
-                sync = request.Sync.Name,
-                root = request.Sync.LocalRoot,
-                ignoreFile = rules.FilePath,
-                path = decision.Path,
-                kind = request.IsDirectory ? "directory" : "file",
-                ignored = decision.IsIgnored,
-                verdict = decision.IsIgnored ? "ignored" : "included",
-                pattern = decision.Pattern,
-                rule = decision.RuleNumber,
-                source = decision.Source,
-                sourceKind,
-                line = ruleInfo?.LineNumber,
-                matchedPath,
-            });
+            WriteJson(output, new IgnoreJsonResult(
+                Command: "ignore",
+                Sync: request.Sync.Name,
+                Root: request.Sync.LocalRoot,
+                IgnoreFile: rules.FilePath,
+                Path: decision.Path,
+                Kind: request.IsDirectory ? "directory" : "file",
+                Ignored: decision.IsIgnored,
+                Verdict: decision.IsIgnored ? "ignored" : "included",
+                Pattern: decision.Pattern,
+                Rule: decision.RuleNumber,
+                Source: decision.Source,
+                SourceKind: sourceKind,
+                Line: ruleInfo?.LineNumber,
+                MatchedAncestor: matchedAncestor));
             return 0;
         }
 
@@ -472,6 +471,27 @@ public static class CliApp
     }
 
     private sealed record IgnoreRequest(SyncConfig Sync, string RelativePath, bool IsDirectory);
+
+    /// <summary>
+    /// Git-shaped JSON for `ignore`: `path` is the queried pathname, and
+    /// `matchedAncestor` exists only when the deciding rule matched a parent
+    /// directory (it is omitted for direct/self matches and no-match cases).
+    /// </summary>
+    private sealed record IgnoreJsonResult(
+        string Command,
+        string Sync,
+        string Root,
+        string? IgnoreFile,
+        string Path,
+        string Kind,
+        bool Ignored,
+        string Verdict,
+        string? Pattern,
+        int? Rule,
+        string? Source,
+        string? SourceKind,
+        int? Line,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? MatchedAncestor);
 
     private static IgnoreRequest ResolveIgnoreRequest(PdsyncConfig config, CliArguments args)
     {

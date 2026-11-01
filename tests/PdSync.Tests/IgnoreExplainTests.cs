@@ -199,8 +199,26 @@ public sealed class IgnoreExplainTests
         root.GetProperty("rule").GetInt32().Should().Be(1);
         root.GetProperty("sourceKind").GetString().Should().Be("file");
         root.GetProperty("line").GetInt32().Should().Be(1);
-        root.GetProperty("matchedPath").GetString().Should().Be("bin");
+        root.GetProperty("matchedAncestor").GetString().Should().Be("bin");
+        root.TryGetProperty("matchedPath", out _).Should().BeFalse();
         root.GetProperty("source").GetString().Should().Contain(".pdignore:1");
+    }
+
+    [Fact]
+    public void Json_DirectFileMatch_OmitsMatchedAncestor()
+    {
+        using var fixture = new Fixture(ignoreText: "*.tmp\n");
+
+        var result = fixture.Cli("ignore", "scratch.tmp", "--json");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var root = document.RootElement;
+        root.GetProperty("path").GetString().Should().Be("scratch.tmp");
+        root.GetProperty("ignored").GetBoolean().Should().BeTrue();
+        root.GetProperty("pattern").GetString().Should().Be("*.tmp");
+        root.TryGetProperty("matchedPath", out _).Should().BeFalse();
+        root.TryGetProperty("matchedAncestor", out _).Should().BeFalse();
     }
 
     [Fact]
@@ -219,7 +237,8 @@ public sealed class IgnoreExplainTests
         root.GetProperty("rule").ValueKind.Should().Be(JsonValueKind.Null);
         root.GetProperty("source").ValueKind.Should().Be(JsonValueKind.Null);
         root.GetProperty("sourceKind").ValueKind.Should().Be(JsonValueKind.Null);
-        root.GetProperty("matchedPath").ValueKind.Should().Be(JsonValueKind.Null);
+        root.TryGetProperty("matchedPath", out _).Should().BeFalse();
+        root.TryGetProperty("matchedAncestor", out _).Should().BeFalse();
     }
 
     [Fact]

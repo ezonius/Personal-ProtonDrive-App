@@ -323,8 +323,12 @@ public sealed class InitCommandTests : IDisposable
         result.ExitCode.Should().Be(0, result.Stderr);
         var configPath = Path.GetFullPath(Path.Combine(local, "pdsync.yaml"));
         var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
-        File.ReadAllText(sync.IgnoreFile).Should().Contain("pdsync.yaml");
-        IgnoreRules.Load(sync).IsIgnored("pdsync.yaml", isDirectory: false).Should().BeTrue();
+        File.ReadAllText(sync.IgnoreFile).Should().Contain("/pdsync.yaml");
+        var rules = IgnoreRules.Load(sync);
+        rules.IsIgnored("pdsync.yaml", isDirectory: false).Should().BeTrue();
+        // The leading slash anchors the rule to the root, so a same-named file
+        // in a subdirectory is still synced.
+        rules.IsIgnored("sub/pdsync.yaml", isDirectory: false).Should().BeFalse();
     }
 
     [Fact]
@@ -356,6 +360,58 @@ public sealed class InitCommandTests : IDisposable
         var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
         File.ReadAllText(sync.IgnoreFile).Should().NotContain("pdsync.yaml");
         IgnoreRules.Load(sync).IsIgnored("pdsync.yaml", isDirectory: false).Should().BeFalse();
+    }
+
+    [Fact]
+    public void BracketNamedDirectory_ConfigIsStillIgnored()
+    {
+        var local = _temp.Combine("Photos [2024]");
+        Directory.CreateDirectory(local);
+        var configPath = Path.Combine(local, "[draft]", "pdsync.yaml");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        var sync = ConfigLoader.Load(configPath).Syncs.Should().ContainSingle().Subject;
+        var rules = IgnoreRules.Load(sync);
+        rules.IsIgnored("[draft]/pdsync.yaml", isDirectory: false).Should().BeTrue();
+        rules.IsIgnored("other/pdsync.yaml", isDirectory: false).Should().BeFalse();
+    }
+
+    [Fact]
+    public void UnrepresentableConfigPath_FailsCleanlyWithoutPartialFiles()
+    {
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        // MAB rewrites '!' into a regex anchor, so no ignore pattern can match
+        // this literal path; init must fail safely instead of leaving a config
+        // that later commands cannot run or that would be synced.
+        var configPath = Path.Combine(local, "a!b", "pdsync.yaml");
+        var ignoreFile = Path.Combine(local, ".pdignore");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain("does not ignore config path");
+        File.Exists(configPath).Should().BeFalse();
+        File.Exists(ignoreFile).Should().BeFalse();
+        Directory.GetFiles(local, ".pdignore.pdsync-init-*").Should().BeEmpty();
+    }
+
+    [Fact]
+    public void ExistingIgnoreFile_WithYes_PreservesInRootIgnoreFile()
+    {
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        var ignoreFile = _temp.Write("docs/.pdignore", "# in-root sentinel\n");
+        var configPath = Path.Combine(local, "config", "pdsync.yaml");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain("refusing to overwrite");
+        File.Exists(configPath).Should().BeFalse();
+        File.ReadAllText(ignoreFile).Should().Be("# in-root sentinel\n");
     }
 
     [Fact]

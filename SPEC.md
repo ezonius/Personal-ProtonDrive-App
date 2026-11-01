@@ -98,9 +98,14 @@ concurrently after the initial probe (the write uses exclusive create). An
 existing `.pdignore` is never overwritten under `--yes`; interactively it is
 replaced only after an explicit yes. When the generated config lies inside the
 selected local root, the ignore content written by `init` (new or interactively
-replaced) also contains the config's relative POSIX path, so the config is not
-synced as ordinary content. A config outside the local root adds no such line.
-An ignore destination that is a directory
+replaced) also contains an anchored ignore rule for the config's relative POSIX
+path, so the config is not synced as ordinary content. The rule starts with `/`
+so it does not match a same-named file in a subdirectory, and literal `[`, `*`,
+and `?` characters are written as bracket expressions. Before committing the
+staged ignore file, `init` loads it and requires the config path to be ignored;
+a path MAB cannot represent safely (for example `!` or `^`) is a config error
+(exit 4) and leaves no config or ignore file behind. A config outside the local
+root adds no such rule. An ignore destination that is a directory
 is rejected before the config is written, and a failed ignore write rolls back
 a config created by this invocation. `init` does not open or create the state
 DB, take the run lock, write fast counters or logs, or call the Proton CLI.
@@ -219,9 +224,11 @@ Additional rules specific to sync:
    state with a `frozen` record; it is not trashed.
 4. Ignored files do not count as local deletions (and vice versa).
 5. The ignore file itself is synced unless explicitly ignored. `init` appends
-   the generated config's relative POSIX path to the ignore file when that
-   config is inside the local root (see §3.1), so the config is ignored by
-   default; a config outside the root needs no entry.
+   a root-anchored ignore rule for the generated config's relative POSIX path
+   when that config is inside the local root (see §3.1), escaping literal `[`,
+   `*`, and `?` and validating the rule before writing. A config outside the
+   root needs no entry; a path MAB cannot represent safely makes `init` fail
+   (exit 4) without partial files.
 6. Patterns are evaluated on the **relative POSIX path** with a trailing `/` for
    directories, matching the `ignore` package's contract.
 7. `pdsync ignore <path> [--sync <name>] [--json]` explains the verdict for

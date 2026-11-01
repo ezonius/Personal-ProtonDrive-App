@@ -49,7 +49,7 @@ deduplication, or bypassing Proton's encryption.
 | D8 | One account, **all CLI calls serialized**, one run at a time per machine (lock file). |
 | D9 | `--dry-run` is the default mental model: `plan` must be a pure projection of the same planner that `run` uses. |
 | D10 | Default conflict policy is **`newer-wins`**, with `keep-both` as the fallback whenever mtimes are too close or untrustworthy. |
-| D11 | Local trash is kept **indefinitely** for now; pruning is a later command, not automatic. |
+| D11 | Local trash is kept **indefinitely** by default; `pdsync trash purge` is the only pruning entry point. Nothing is purged during `plan`, `run`, or `doctor`. |
 | D12 | **One `.pdignore` per sync root**, analogous to one `.gitignore` at a repo root. No global ignore file. Nested `.pdignore` files are not read in v1. |
 | D13 | `--fast` may skip remote listing only for subtrees with **no local changes**; skipped subtrees produce **no actions at all**, and a full scan runs at least every `fastFullEveryRuns`. Folder `modificationTime` is useless for this (S4). |
 | D14 | **Case is not synced.** Identity is case-folded on every platform; a case-only local rename is a no-op. (§5.4.1) |
@@ -70,6 +70,8 @@ pdsync plan [sync...] [--json]   # show what would happen; never writes
 pdsync run  [sync...] [--json]   # apply
 pdsync status [--json]           # last run per sync, pending conflicts
 pdsync ignore <path>             # explain which pattern matched (debug)
+pdsync trash list [--sync <name>] [--json]   # local trash inventory; never writes
+pdsync trash purge --older-than <days> [--dry-run] [--yes] [--sync <name>] [--json]
 pdsync history [sync]            # recent runs and actions
 pdsync rebuild <sync> --policy=… # rebuild state from local+remote (last resort)
 ```
@@ -113,6 +115,21 @@ rolls back a config created by this invocation. `init` does not open or create t
 DB, take the run lock, write fast counters or logs, or call the Proton CLI.
 Positional sync names and the `--fast`/`--full` scan flags are not meaningful for
 `init` and are rejected as usage errors (exit 1).
+
+`trash list` is read-only: it walks `<stateDir>/trash/<syncId>/<runId>/`
+and never opens the state DB, takes the run lock, writes fast counters, creates
+directories, or calls Proton. It lists every trash run by default (including
+sync ids that no longer match a configured sync) or only the ids selected by
+`--sync`. `--json` prints a top-level array of
+`{syncId, runId, createdAt, fileCount, bytes, hasManifest}`; `fileCount` and
+`bytes` exclude the per-run `manifest.json`, and `hasManifest` is false when the
+manifest is missing or unreadable. `trash purge` deletes whole run directories
+only, requires `--older-than <days>` and an interactive yes unless `--yes`,
+and never touches files outside `<stateDir>/trash`. A run directory whose sync
+lock file exists is reported as skipped, not deleted; stale locks are never
+broken automatically (SPEC §8 rule 6). `--dry-run` prints the same selection
+and exits 0 without prompting or deleting. `trash purge` accepts a disabled
+`--sync` too: retention is maintenance, not a sync operation.
 
 Exit codes:
 
@@ -791,9 +808,37 @@ Rules:
 
 Local trash layout (default `<stateDir>/trash/<sync>/<runId>/<relpath>`), with a
 JSON manifest per run. Retention is **forever** by default: nothing is pruned
-automatically, and a later `pdsync trash purge` (M5) will be explicit and
-interactive. Remote trash is Proton Trash; `doctor` notes that Proton's own
-retention policy applies there and may eventually remove the recoverable copy.
+automatically, and `pdsync trash purge` is the only pruning entry point. It
+never runs as part of `plan`, `run`, or `doctor`.
+
+Purge rules:
+
+- Only `<stateDir>/trash/<syncId>/<runId>/` directories are eligible. Every
+  candidate is canonicalized and re-validated against the trash root
+  immediately before deletion; invalid ids, `..`, rooted segments, and any
+  path that resolves outside the root are refused with the safety exit (6).
+- Only whole run directories are deleted. Individual files are never removed,
+  and a run directory containing a reparse point is refused rather than
+  traversed.
+- A run directory is eligible when its creation time is older than
+  `--older-than <days>` (cutoff `now - days`). It is purgeable even when its
+  manifest is missing or unreadable, but `trash list` reports
+  `hasManifest: false` distinctly.
+- If `<stateDir>/locks/<syncId>.lock` exists, every run for that sync is
+  reported as skipped (`active-run-lock`) and left in place. A stale lock must
+  be removed manually; purge never breaks it.
+- Purge is local-only: no Proton calls, no state DB read/write, and no schema
+  change. `--dry-run` performs the full selection and reports it without
+  deleting. Without `--yes`, an interactive yes is required; end-of-input
+  cancels with exit 0.
+- `trash purge --json` emits `{command, olderThanDays, cutoff, dryRun,
+  removed[], skippedActive[]}` where each removed row has
+  `{syncId, runId, path, createdAt, fileCount, bytes, hasManifest}` and each
+  skipped row has `{syncId, runId, path, reason}`. A cancelled purge adds
+  `aborted: true` and an empty `removed` array.
+
+Remote trash is Proton Trash; `doctor` notes that Proton's own retention policy
+applies there and may eventually remove the recoverable copy.
 
 ### 7.1 Run logs (NFR-10)
 
@@ -949,6 +994,7 @@ src/PdSync/
     Verifier.cs                 # upload/download size + SHA-1 checks
     SafetyGuard.cs              # deletion budget + empty-tree guard
     LocalTrashStore.cs          # trash moves + manifests
+    LocalTrashIndex.cs          # read-only trash inventory + guarded purge
     RunLock.cs                  # per-sync lock
     FileSystemUtil.cs           # cross-volume move fallback
   State/
@@ -1103,6 +1149,7 @@ v1 ships at M4; M5 is the "leave it running" bar.
 | `init --yes` defaults | Accept current defaults: cwd as local root, derived sync name, `/my-files/<name>` remote root, and the default junk/temp/log ignore set. | §3.1, #27 |
 | `ignore --json` matched path | Git-shaped, implemented in #29: `path` is the queried pathname; `matchedPath` is removed; `matchedAncestor` is emitted only when a parent-directory rule decides the result and is omitted for direct/self matches and no-match results. | §3.3 rule 7, #25, implementation #29 |
 | `init` config inside the sync root | Append the generated config's relative POSIX path to the `.pdignore` produced by `init` when the config lies under the local root. | §3.1/§3.3, #28, implementation #30 |
+| Local trash purge semantics | `trash purge --older-than <days>` deletes whole run directories only; interactive yes unless `--yes`; `--dry-run` is non-destructive; any sync-lock file means skip (`active-run-lock`); reparse points and paths outside the trash root are refused. `trash list` is filesystem-only/read-only and emits a top-level JSON array. | §3.1, §7, D11, #13 |
 
 Still open (can be decided during M0/M4, not blocking design):
 

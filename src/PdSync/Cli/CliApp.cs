@@ -49,7 +49,7 @@ public static class CliApp
             return parsed.ShowHelp ? 0 : 1;
         }
 
-        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init"))
+        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init" or "trash"))
             return Unknown(parsed.Command, error);
 
         if (parsed.Command == "init" &&
@@ -58,6 +58,16 @@ public static class CliApp
             error.WriteLine(
                 "pdsync: init accepts only --config, --yes, --json, --verbose, --interactive, and --no-color");
             return 1;
+        }
+
+        if (parsed.Command == "trash")
+        {
+            var usageError = ValidateTrashArguments(parsed);
+            if (usageError is not null)
+            {
+                error.WriteLine("pdsync: " + usageError);
+                return 1;
+            }
         }
 
         try
@@ -77,6 +87,7 @@ public static class CliApp
                 "doctor" => Doctor(config, parsed, output, error, desktopMappings ?? new DesktopMappingDetector()),
                 "status" => Status(config, parsed, output, error),
                 "ignore" => Ignore(config, parsed, output, error),
+                "trash" => Trash(config, parsed, input ?? Console.In, output, error),
                 _ => Unknown(parsed.Command, error),
             };
         }
@@ -580,6 +591,33 @@ public static class CliApp
         (rawPath[^1] == '/' || rawPath[^1] == '\\') &&
         !PathUtil.IsDriveOrFilesystemRoot(rawPath);
 
+    private static int Trash(
+        PdsyncConfig config,
+        CliArguments args,
+        TextReader input,
+        TextWriter output,
+        TextWriter error) =>
+        args.Subcommand == "list"
+            ? TrashCommand.ExecuteList(config, args.SyncNames, args.Json, output)
+            : TrashCommand.ExecutePurge(
+                config, args.SyncNames, args.OlderThanDays!.Value, args.DryRun,
+                args.Yes, args.Json, input, output, error);
+
+    private static string? ValidateTrashArguments(CliArguments args)
+    {
+        if (args.Subcommand is not ("list" or "purge"))
+            return "trash requires a subcommand: list or purge";
+        if (args.Fast || args.Full || args.Force || args.Interactive)
+            return "trash accepts only --config, --sync, --json, --verbose, --yes, --dry-run, --older-than, and --no-color";
+        if (args.UnexpectedPositional)
+            return "trash does not accept positional arguments; use --sync <name>";
+        if (args.Subcommand == "list" && (args.OlderThanDays is not null || args.DryRun || args.Yes))
+            return "trash list accepts only --config, --sync, --json, --verbose, and --no-color";
+        if (args.Subcommand == "purge" && args.OlderThanDays is null)
+            return "trash purge requires --older-than <days>";
+        return null;
+    }
+
     private static List<SyncConfig> SelectSyncs(PdsyncConfig config, IReadOnlyList<string> names)
     {
         if (names.Count == 0)
@@ -713,6 +751,9 @@ public static class CliApp
               doctor              check CLI, auth, roots, state
               status [sync...]    recent runs and pending rows
               ignore <path>       explain the ignore rule for a path; never writes
+              trash list          list local trash runs; never writes
+              trash purge --older-than <days> [--dry-run] [--yes]
+                                  delete whole trash run directories (manual only)
 
             Options:
               --config <path>     explicit config file
@@ -739,6 +780,10 @@ public static class CliApp
         public bool Interactive { get; private set; }
         public bool Yes { get; private set; }
         public bool ShowHelp { get; private set; }
+        public bool DryRun { get; private set; }
+        public int? OlderThanDays { get; private set; }
+        public bool UnexpectedPositional { get; private set; }
+        public string? Subcommand { get; private set; }
         public string? PathArgument { get; private set; }
         public List<string> SyncNames { get; } = new();
 
@@ -785,6 +830,12 @@ public static class CliApp
                     case "--yes":
                         result.Yes = true;
                         break;
+                    case "--dry-run":
+                        result.DryRun = true;
+                        break;
+                    case "--older-than":
+                        result.OlderThanDays = ParseDays(Next(args, ref i, "--older-than"));
+                        break;
                     case "--interactive":
                         result.Interactive = true;
                         break;
@@ -799,6 +850,8 @@ public static class CliApp
                             result.ConfigPath = arg["--config=".Length..];
                         else if (arg.StartsWith("--sync=", StringComparison.Ordinal))
                             result.SyncNames.Add(arg["--sync=".Length..]);
+                        else if (arg.StartsWith("--older-than=", StringComparison.Ordinal))
+                            result.OlderThanDays = ParseDays(arg["--older-than=".Length..]);
                         else if (arg.StartsWith('-'))
                             throw new ArgumentException($"unknown option '{arg}'");
                         else
@@ -817,10 +870,23 @@ public static class CliApp
         {
             if (Command is null)
                 Command = arg;
+            else if (Command == "trash" && Subcommand is null)
+                Subcommand = arg;
             else if (Command == "ignore" && PathArgument is null)
                 PathArgument = arg;
             else
+            {
+                if (Command == "trash")
+                    UnexpectedPositional = true;
                 SyncNames.Add(arg);
+            }
+        }
+
+        private static int ParseDays(string value)
+        {
+            if (!int.TryParse(value, out var days) || days < 1)
+                throw new ArgumentException("--older-than requires a positive number of days");
+            return days;
         }
 
         private static string Next(string[] args, ref int index, string option)

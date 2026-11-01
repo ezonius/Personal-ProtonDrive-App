@@ -117,6 +117,7 @@ public sealed class ProtonCliRetryTests : IDisposable
         exception.Kind.Should().Be(ProtonFailureKind.Auth);
         exception.ExitCode.Should().Be(3);
         exception.Attempts.Should().Be(1);
+        exception.Message.Should().Contain("proton-drive auth login");
     }
 
     [Fact]

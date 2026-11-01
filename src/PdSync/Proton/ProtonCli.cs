@@ -452,6 +452,7 @@ public sealed class ProtonCli
         var message = $"proton-drive exited {result.ExitCode} operating on {target}: {detail.Trim()}";
         if (kind == ProtonFailureKind.Auth)
         {
+            message += "; run 'proton-drive auth login' and retry";
             return new ProtonAuthException(
                 message,
                 result.Args,

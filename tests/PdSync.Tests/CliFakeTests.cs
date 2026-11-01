@@ -41,6 +41,21 @@ public sealed class CliFakeTests
         result.Stderr.Should().Contain("invalid ignore pattern");
     }
 
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("run")]
+    public void MalformedInlineExclude_ReturnsConfigExit4(string command)
+    {
+        using var fixture = new Fixture(exclude: "[");
+        fixture.SeedRoot();
+
+        var result = fixture.Cli(command);
+
+        result.ExitCode.Should().Be(4, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("config:");
+        result.Stderr.Should().Contain("invalid ignore pattern");
+    }
+
     [Fact]
     public void Run_PushesCreatesAndSecondRunIsNoOp()
     {
@@ -538,7 +553,7 @@ public sealed class CliFakeTests
         private readonly string? _oldState;
         private readonly string _fakeExe;
 
-        public Fixture(string? defaults = null, string? safety = null)
+        public Fixture(string? defaults = null, string? safety = null, string? exclude = null)
         {
             _oldState = Environment.GetEnvironmentVariable("PDSYNC_FAKE_STATE");
             Local = _temp.Combine("local");
@@ -554,6 +569,7 @@ public sealed class CliFakeTests
 
             var defaultBlock = defaults is null ? string.Empty : defaults;
             var safetyBlock = safety is null ? string.Empty : $"  safety:\n      {safety}";
+            var excludeBlock = exclude is null ? string.Empty : $"exclude:\n  - \"{exclude}\"";
             var yaml = $"""
                 version: 1
                 stateDir: "{_temp.YamlPath("state")}"
@@ -567,6 +583,7 @@ public sealed class CliFakeTests
                   docs:
                     local: "{Local.Replace('\\', '/')}"
                     remote: /my-files/root
+                {Indent(excludeBlock, 4)}
                 """;
             ConfigPath = _temp.Write("pdsync.yaml", yaml);
             Config = PdSync.Config.ConfigLoader.Load(ConfigPath);

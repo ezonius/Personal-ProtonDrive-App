@@ -138,8 +138,8 @@ These are the easiest invariants to break. Check `SPEC.md` §2 for the full list
 13. **One account, serialized CLI calls.** Never run two live CLI operations in
     parallel; caches and rate limits are shared. `ProtonCli` locks internally.
 14. **Config is strict.** Unknown keys, duplicate YAML keys, invalid enum values,
-    invalid ranges, overlapping sync roots, and a state dir inside a sync root
-    are config errors (exit 4).
+    invalid ranges, overlapping sync roots, and a state/log dir inside a sync
+    root are config errors (exit 4).
 
 Exit codes: `0` OK, `1` runtime/partial failure, `2` blocking conflict,
 `3` auth, `4` config, `5` lock held, `6` safety guard.
@@ -186,7 +186,7 @@ parallelism is otherwise disabled in the assembly/test setup.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 
 Prefer behavior assertions over implementation details. The current suite is
-**181 tests**.
+**184 tests**.
 
 ---
 

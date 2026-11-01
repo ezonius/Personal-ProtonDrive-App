@@ -24,7 +24,7 @@ public sealed class RunLogger : IDisposable
     private readonly string _syncName;
     private readonly string _syncId;
     private readonly long _runId;
-    private readonly TextWriter _output;
+    private readonly TextWriter _diagnostics;
     private readonly object _gate = new();
     private bool _warningWritten;
     private bool _disposed;
@@ -35,14 +35,14 @@ public sealed class RunLogger : IDisposable
         string syncName,
         string syncId,
         long runId,
-        TextWriter output)
+        TextWriter diagnostics)
     {
         _writer = writer;
         Path = path;
         _syncName = syncName;
         _syncId = syncId;
         _runId = runId;
-        _output = output;
+        _diagnostics = diagnostics;
     }
 
     /// <summary>Absolute log path, or <c>null</c> when logging could not be enabled.</summary>
@@ -55,9 +55,10 @@ public sealed class RunLogger : IDisposable
         PlanStats stats,
         bool fast,
         int runsSinceFull,
-        TextWriter output)
+        TextWriter diagnostics)
     {
         StreamWriter? writer = null;
+        FileStream? stream = null;
         string? path = null;
         try
         {
@@ -68,27 +69,32 @@ public sealed class RunLogger : IDisposable
             // distinct if the state DB is rebuilt and ids restart at 1.
             var stamp = DateTimeOffset.UtcNow.ToString(
                 "yyyyMMdd'T'HHmmssfff'Z'", CultureInfo.InvariantCulture);
-            path = System.IO.Path.Combine(directory, $"{runId:D8}-{stamp}.jsonl");
-            for (var suffix = 1; File.Exists(path); suffix++)
+            var candidate = System.IO.Path.Combine(directory, $"{runId:D8}-{stamp}.jsonl");
+            for (var suffix = 1; File.Exists(candidate); suffix++)
             {
-                path = System.IO.Path.Combine(directory,
+                candidate = System.IO.Path.Combine(directory,
                     $"{runId:D8}-{stamp}-{suffix.ToString(CultureInfo.InvariantCulture)}.jsonl");
             }
 
-            var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write,
+            stream = new FileStream(candidate, FileMode.CreateNew, FileAccess.Write,
                 FileShare.Read);
             writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
             {
                 AutoFlush = true,
             };
+            path = candidate;
         }
         catch (Exception ex)
         {
-            output.WriteLine($"warning: could not write run log: {ex.Message}");
+            writer?.Dispose();
+            if (writer is null)
+                stream?.Dispose();
+            path = null;
+            diagnostics.WriteLine($"warning: could not write run log: {ex.Message}");
         }
 
         var syncId = PdSync.State.StateStore.ComputeSyncId(sync.LocalRoot, sync.RemoteRoot);
-        var logger = new RunLogger(writer, path, sync.Name, syncId, runId, output);
+        var logger = new RunLogger(writer, path, sync.Name, syncId, runId, diagnostics);
         logger.Write(new
         {
             schemaVersion = SchemaVersion,
@@ -155,6 +161,7 @@ public sealed class RunLogger : IDisposable
         long durationMs,
         int succeeded,
         int failed,
+        int skipped,
         int prunedRemoteDirectories,
         string? error = null)
     {
@@ -169,6 +176,7 @@ public sealed class RunLogger : IDisposable
             durationMs,
             succeeded,
             failed,
+            skipped,
             prunedRemoteDirectories,
             error,
         });
@@ -190,7 +198,7 @@ public sealed class RunLogger : IDisposable
                 if (!_warningWritten)
                 {
                     _warningWritten = true;
-                    _output.WriteLine($"warning: run log write failed: {ex.Message}");
+                    _diagnostics.WriteLine($"warning: run log write failed: {ex.Message}");
                 }
             }
         }
@@ -219,7 +227,19 @@ public sealed class RunLogger : IDisposable
         foreach (var ch in name)
             builder.Append(Array.IndexOf(invalid, ch) >= 0 ? '_' : ch);
 
-        var sanitized = builder.ToString().Trim();
-        return sanitized.Length == 0 || sanitized is "." or ".." ? "sync" : sanitized;
+        var sanitized = builder.ToString().Trim().TrimEnd('.', ' ');
+        if (sanitized.Length == 0 || sanitized is "." or "..")
+            return "sync";
+
+        var stem = sanitized.Split('.')[0];
+        var reserved = new[]
+        {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        };
+        return reserved.Contains(stem, StringComparer.OrdinalIgnoreCase)
+            ? "_" + sanitized
+            : sanitized;
     }
 }

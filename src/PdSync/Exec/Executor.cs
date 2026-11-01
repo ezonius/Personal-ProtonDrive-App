@@ -38,8 +38,9 @@ public sealed class ExecutionReport
     public IReadOnlyList<ActionOutcome> Outcomes { get; }
     public IReadOnlyList<PlanAdoption> Adoptions { get; }
     public IReadOnlyList<string> PrunedRemoteDirectories { get; }
-    public int Failed => Outcomes.Count(o => !o.Success);
-    public int Succeeded => Outcomes.Count(o => o.Success);
+    public int Failed => Outcomes.Count(o => o.Status == "failed");
+    public int Succeeded => Outcomes.Count(o => o.Status == "ok");
+    public int Skipped => Outcomes.Count(o => o.Status == "skipped");
 }
 
 /// <summary>
@@ -68,6 +69,7 @@ public sealed class Executor
     private readonly List<string> _failedPrefixes = new();
     private readonly HashSet<string> _failedKeys = new(StringComparer.Ordinal);
     private readonly List<string> _pruned = new();
+    private readonly List<ActionOutcome> _outcomes = new();
 
     public Executor(
         PdsyncConfig config,
@@ -101,9 +103,15 @@ public sealed class Executor
         _stagingRoot = Path.Combine(config.StateDir, "tmp", runId.ToString(CultureInfo.InvariantCulture));
     }
 
+    /// <summary>Outcomes recorded so far, even when <see cref="Execute"/> throws.</summary>
+    public IReadOnlyList<ActionOutcome> PartialOutcomes => _outcomes;
+
+    /// <summary>Remote directories pruned so far, even when <see cref="Execute"/> throws.</summary>
+    public IReadOnlyList<string> PartialPrunedRemoteDirectories => _pruned;
+
     public ExecutionReport Execute(CancellationToken cancellationToken = default)
     {
-        var outcomes = new List<ActionOutcome>();
+        var outcomes = _outcomes;
 
         try
         {
@@ -138,12 +146,22 @@ public sealed class Executor
                     if (_verbose)
                         _output.WriteLine($"ok     {Describe(action)}");
                 }
-                catch (ProtonAuthException)
+                catch (ProtonAuthException ex)
                 {
+                    stopwatch.Stop();
+                    Record(outcomes, new ActionOutcome(action, false, ex.Message,
+                        stopwatch.ElapsedMilliseconds));
+                    _failedKeys.Add(action.PathKey);
+                    if (action.IsDelete)
+                        _failedPrefixes.Add(action.PathKey + "/");
+                    _output.WriteLine($"FAILED {Describe(action)}: {ex.Message}");
                     throw;
                 }
-                catch (OperationCanceledException)
+                catch (OperationCanceledException ex)
                 {
+                    stopwatch.Stop();
+                    Record(outcomes, new ActionOutcome(action, false,
+                        "cancelled: " + ex.Message, stopwatch.ElapsedMilliseconds));
                     throw;
                 }
                 catch (Exception ex)
@@ -166,6 +184,10 @@ public sealed class Executor
                 {
                     Adopt(adoption);
                     stopwatch.Stop();
+                    outcomes.Add(new ActionOutcome(
+                        new PlanAction(PlanActionKind.DropBase, adoption.Path, adoption.PathKey,
+                            Reason: "adoption"),
+                        true, DurationMs: stopwatch.ElapsedMilliseconds));
                     _log?.Action("Adopt", adoption.Path, adoption.PathKey, null,
                         "ok", stopwatch.ElapsedMilliseconds);
                 }

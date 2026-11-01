@@ -293,7 +293,12 @@ public sealed class CliFakeTests
         finish.GetProperty("status").GetString().Should().Be("ok");
         finish.GetProperty("succeeded").GetInt32().Should().Be(1);
         finish.GetProperty("failed").GetInt32().Should().Be(0);
+        finish.GetProperty("skipped").GetInt32().Should().Be(0);
         finish.GetProperty("durationMs").GetInt64().Should().BeGreaterThanOrEqualTo(0);
+
+        using var state = PdSync.State.StateStore.OpenReadOnly(
+            fixture.Config, fixture.Config.Syncs.Single());
+        state.LoadRuns(1).Single().StatsJson.Should().Contain("\"logFile\"");
     }
 
     [Fact]
@@ -302,6 +307,11 @@ public sealed class CliFakeTests
         using var fixture = new Fixture();
         fixture.SeedRoot();
         fixture.WriteLocal("a.txt", "alpha");
+
+        var firstPlan = fixture.Cli("plan");
+        firstPlan.ExitCode.Should().Be(0, firstPlan.Stderr);
+        Directory.Exists(Path.Combine(fixture.StateDir, "logs")).Should().BeFalse();
+
         fixture.Cli("run").ExitCode.Should().Be(0);
         var logsBefore = RunLogFiles(fixture.StateDir).Length;
 
@@ -310,6 +320,22 @@ public sealed class CliFakeTests
 
         result.ExitCode.Should().Be(0, result.Stderr);
         RunLogFiles(fixture.StateDir).Should().HaveCount(logsBefore);
+    }
+
+    [Fact]
+    public void Run_JsonStaysValidWhenLogDirIsUnwritable()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        File.WriteAllText(Path.Combine(fixture.StateDir, "logs"), "not a directory");
+
+        var result = fixture.Cli("run", "--json");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        result.Stderr.Should().Contain("could not write run log");
+        using var document = JsonDocument.Parse(result.Stdout);
+        document.RootElement.GetProperty("command").GetString().Should().Be("run");
     }
 
     [Fact]
@@ -324,9 +350,11 @@ public sealed class CliFakeTests
             """);
         fixture.Fake("__fake", "scenario", scenario);
 
-        var result = fixture.Cli("run");
+        var result = fixture.Cli("run", "--json");
 
         result.ExitCode.Should().Be(1);
+        using var document = JsonDocument.Parse(result.Stdout);
+        document.RootElement.GetProperty("command").GetString().Should().Be("run");
         var logFiles = RunLogFiles(fixture.StateDir);
         logFiles.Should().ContainSingle();
         var events = ReadRunLog(logFiles.Single());
@@ -347,8 +375,9 @@ public sealed class CliFakeTests
         using var fixture = new Fixture();
         fixture.SeedRoot();
         fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("b.txt", "beta");
         var scenario = fixture.Temp.Write("scenario.json", """
-            { "rules": [ { "match": "fs upload", "times": 1, "authExpired": true } ] }
+            { "rules": [ { "match": "b.txt", "times": 1, "authExpired": true } ] }
             """);
         fixture.Fake("__fake", "scenario", scenario);
 
@@ -358,9 +387,21 @@ public sealed class CliFakeTests
         var logFiles = RunLogFiles(fixture.StateDir);
         logFiles.Should().ContainSingle();
         var events = ReadRunLog(logFiles.Single());
+        var failedAction = events.Single(e =>
+            e.GetProperty("event").GetString() == "action" &&
+            e.GetProperty("path").GetString() == "b.txt");
+        failedAction.GetProperty("outcome").GetString().Should().Be("failed");
+
         var finish = events.Single(e => e.GetProperty("event").GetString() == "run_finish");
         finish.GetProperty("status").GetString().Should().Be("failed");
+        finish.GetProperty("succeeded").GetInt32().Should().Be(1);
+        finish.GetProperty("failed").GetInt32().Should().Be(1);
         finish.GetProperty("error").GetString().Should().Contain("not authenticated");
+
+        using var state = PdSync.State.StateStore.OpenReadOnly(
+            fixture.Config, fixture.Config.Syncs.Single());
+        var stats = state.LoadRuns(1).Single().StatsJson;
+        stats.Should().Contain("\"logFile\"").And.Contain("\"failed\":1");
     }
 
     private static string[] RunLogFiles(string stateDir)

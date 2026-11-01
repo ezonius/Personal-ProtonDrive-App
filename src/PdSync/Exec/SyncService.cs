@@ -55,7 +55,8 @@ public sealed record SyncAttempt(
     ExecutionReport? Report,
     bool UsedFastListing,
     int RunsSinceFull,
-    string? Warning);
+    string? Warning,
+    long DurationMs = 0);
 
 /// <summary>
 /// Orchestrates snapshots, planner, safety guards, executor, and state commit
@@ -82,8 +83,10 @@ public static class SyncService
         bool force,
         bool interactive,
         bool verbose,
-        TextWriter output)
+        TextWriter output,
+        TextWriter? diagnostics = null)
     {
+        var diagnosticsWriter = diagnostics ?? output;
         using var prepared = Prepare(config, sync, readOnly: false, fastRequested, fullRequested, interactive);
 
         var pending = prepared.State.LoadPending();
@@ -95,7 +98,7 @@ public static class SyncService
             // avoids blocking every future run on a stale row.
             prepared.State.ClearPending();
             warning = $"cleared {pending.Count} stale pending row(s) from an interrupted run";
-            output.WriteLine("warning: " + warning);
+            diagnosticsWriter.WriteLine("warning: " + warning);
         }
 
         SafetyGuard.CheckDeletionBudget(
@@ -108,10 +111,11 @@ public static class SyncService
         var runStopwatch = Stopwatch.StartNew();
         using var log = RunLogger.Create(
             config, sync, runId, prepared.Plan.Stats, prepared.UsedFastListing,
-            prepared.RunsSinceFull, output);
+            prepared.RunsSinceFull, diagnosticsWriter);
+        Executor? executor = null;
         try
         {
-            var executor = new Executor(
+            executor = new Executor(
                 config,
                 sync,
                 prepared.Cli,
@@ -134,22 +138,39 @@ public static class SyncService
                 planned = prepared.Plan.Stats,
                 succeeded = report.Succeeded,
                 failed = report.Failed,
+                skipped = report.Skipped,
                 prunedRemoteDirectories = report.PrunedRemoteDirectories,
                 logFile = log.Path,
             }));
             runStopwatch.Stop();
             log.RunFinish(status, runStopwatch.ElapsedMilliseconds,
-                report.Succeeded, report.Failed, report.PrunedRemoteDirectories.Count);
+                report.Succeeded, report.Failed, report.Skipped,
+                report.PrunedRemoteDirectories.Count);
 
             if (fastRequested)
                 FastScanTracker.RecordRun(config, sync, fullScan: !prepared.UsedFastListing);
-            return new SyncAttempt(prepared.Plan, report, prepared.UsedFastListing, prepared.RunsSinceFull, warning);
+            return new SyncAttempt(prepared.Plan, report, prepared.UsedFastListing,
+                prepared.RunsSinceFull, warning, runStopwatch.ElapsedMilliseconds);
         }
         catch (Exception ex)
         {
+            var partial = executor?.PartialOutcomes ?? Array.Empty<ActionOutcome>();
+            var succeeded = partial.Count(o => o.Status == "ok");
+            var failed = partial.Count(o => o.Status == "failed");
+            var skipped = partial.Count(o => o.Status == "skipped");
+            var pruned = executor?.PartialPrunedRemoteDirectories.Count ?? 0;
             try
             {
-                prepared.State.FinishRun(runId, "failed");
+                prepared.State.FinishRun(runId, "failed", JsonSerializer.Serialize(new
+                {
+                    planned = prepared.Plan.Stats,
+                    succeeded,
+                    failed,
+                    skipped,
+                    prunedRemoteDirectories = executor?.PartialPrunedRemoteDirectories ?? Array.Empty<string>(),
+                    logFile = log.Path,
+                    error = ex.Message,
+                }));
             }
             catch
             {
@@ -157,7 +178,8 @@ public static class SyncService
             }
 
             runStopwatch.Stop();
-            log.RunFinish("failed", runStopwatch.ElapsedMilliseconds, 0, 0, 0, ex.Message);
+            log.RunFinish("failed", runStopwatch.ElapsedMilliseconds,
+                succeeded, failed, skipped, pruned, ex.Message);
             throw;
         }
     }

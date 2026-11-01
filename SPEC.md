@@ -672,27 +672,39 @@ Every executing `run` writes one JSONL file:
 <logDir>/<sync-name>/<runId:D8>-<yyyyMMddTHHmmssfffZ>.jsonl
 ```
 
-The timestamp suffix keeps files distinct if the state DB is rebuilt and run ids
-restart. Each line is a self-contained JSON object with `schemaVersion: 1` and
-an `event` field:
+The sync-name directory is sanitized for filesystem-invalid characters and
+Windows reserved names. The timestamp suffix keeps files distinct if the state
+DB is rebuilt and run ids restart; an additional `-N` suffix resolves the rare
+same-millisecond collision. Each line is a self-contained JSON object with
+`schemaVersion: 1` and an `event` field:
 
 | Event | Fields |
 |---|---|
 | `run_start` | `sync`, `syncId`, `runId`, `startedAt`, `fast`, `runsSinceFull`, `planned` (the planner stats object) |
 | `action` | `sync`, `runId`, `kind`, `path`, `pathKey`, `secondaryPath`, `outcome` (`ok`/`failed`/`skipped`), `durationMs`, `error` |
 | `verification` | `sync`, `runId`, `kind`, `path`, `method` (`size`, `size+sha1`, optionally `+download-back`), `result` (`ok`/`failed`), `downloadBack`, `detail` |
-| `run_finish` | `sync`, `runId`, `status` (`ok`/`conflict`/`partial`/`failed`), `finishedAt`, `durationMs`, `succeeded`, `failed`, `prunedRemoteDirectories`, `error` |
+| `run_finish` | `sync`, `runId`, `status` (`ok`/`conflict`/`partial`/`failed`), `finishedAt`, `durationMs`, `succeeded`, `failed`, `skipped`, `prunedRemoteDirectories`, `error` |
 
 `kind` is the `PlanActionKind` name (PascalCase, matching `plan --json`) or
 `Adopt` for state adoptions. A verification event follows the action that
-verified it; a failed verification is also reflected in the action's `error`.
-The `runs.stats_json` column records the same counts plus `logFile`.
+verified it; a failed verification is also reflected in the action's `error` and
+`verification.result` is `failed`. Counts exclude skipped actions from
+`succeeded`/`failed` and report them separately in `skipped`. The
+`runs.stats_json` column records the same counts plus `logFile`; on a failed run
+it also records `error`, and any actions completed before the failure are still
+counted.
 
-`plan` never creates a log file or the log directory. Log writing is
-best-effort: if `logDir` is not writable, the run prints a warning and proceeds.
-Logs are retained indefinitely in v1; there is no automatic pruning, rotation,
-or size cap. Operators manage retention themselves, and a future `history`
-command will read these files.
+`plan` never creates a log file or the log directory, and it does not emit a run
+summary. Log writing is best-effort: if `logDir` is not writable, the run prints
+a warning to stderr and proceeds; diagnostics are never written to stdout, so
+`run --json` remains parseable. A process kill or power loss can leave a
+truncated log without `run_finish`; readers must tolerate that.
+
+`logDir` must not be the same as or inside any sync's local root, analogous to
+`stateDir`; otherwise the next run would scan and upload its own logs. Logs are
+retained indefinitely in v1; there is no automatic pruning, rotation, or size
+cap. Operators manage retention themselves, and a future `history` command will
+read these files.
 
 ---
 
@@ -749,7 +761,7 @@ Non-negotiable, enforced before any destructive action:
 | NFR-7 | Secrets never appear in config or logs; auth remains entirely inside the CLI. |
 | NFR-8 | Exit codes and `--json` are stable contract; human output may change. |
 | NFR-9 | CLI version is checked at startup; unsupported versions fail with a clear message. |
-| NFR-10 | Runs emit a machine-readable action log (JSONL, §7.1) under `logDir` and a human summary with counts and durations; `plan` emits neither. |
+| NFR-10 | Runs emit a machine-readable action log (JSONL, §7.1) under `logDir` and a human summary with counts and durations; `plan` emits no JSONL log and no run summary. |
 | NFR-11 | Case is never synced: a local case-only rename produces no remote action, and no run creates a second remote entry differing only by case. |
 | NFR-14 | Case-fold collisions abort the affected sync before any write; both colliding paths appear in the report. |
 | NFR-15 | Upload verification uses one parent listing per folder, not one `fs info` per file. |

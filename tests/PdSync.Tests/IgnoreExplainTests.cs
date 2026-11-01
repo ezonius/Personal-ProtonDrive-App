@@ -223,6 +223,87 @@ public sealed class IgnoreExplainTests
     }
 
     [Fact]
+    public void MalformedIgnoreFile_IsACleanConfigError()
+    {
+        using var fixture = new Fixture(ignoreText: "foo[\n");
+
+        var result = fixture.Cli("ignore", "bin/tool.exe");
+
+        result.ExitCode.Should().Be(4);
+        result.Stdout.Should().BeEmpty();
+        result.Stderr.Should().StartWith("config: ignore:");
+        result.Stderr.Should().Contain("invalid ignore pattern 'foo['");
+        result.Stderr.Should().NotContain("Unhandled exception");
+        result.Stderr.Should().NotContain("   at ");
+
+        var json = fixture.Cli("ignore", "bin/tool.exe", "--json");
+        json.ExitCode.Should().Be(4);
+        json.Stdout.Should().BeEmpty();
+        json.Stderr.Should().StartWith("config: ignore:");
+        json.Stderr.Should().NotContain("   at ");
+    }
+
+    [Fact]
+    public void LeadingSeparatorPath_IsTreatedAsRooted()
+    {
+        using var fixture = new Fixture(ignoreText: "*.tmp\n");
+
+        var result = fixture.Cli("ignore", "/bin/tool.exe");
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain("not inside any selected sync root");
+
+        if (OperatingSystem.IsWindows())
+        {
+            var windowsRooted = fixture.Cli("ignore", "\\bin\\tool.exe");
+            windowsRooted.ExitCode.Should().Be(4);
+            windowsRooted.Stderr.Should().Contain("not inside any selected sync root");
+        }
+    }
+
+    [Fact]
+    public void DuplicateSyncSelection_IsDeduplicatedCaseInsensitively()
+    {
+        using var fixture = new Fixture(ignoreText: "*.tmp\n", secondSync: true);
+
+        var result = fixture.Cli("ignore", "a.tmp", "--sync", "docs", "--sync", "DOCS");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        result.Stdout.Should().Contain("ignore docs: a.tmp (file)");
+        result.Stdout.Should().Contain("verdict: ignored");
+    }
+
+    [Fact]
+    public void EndOfOptions_AllowsADashPrefixedPath()
+    {
+        using var fixture = new Fixture(ignoreText: "-draft.txt\n");
+
+        var result = fixture.Cli("ignore", "--", "-draft.txt");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        result.Stdout.Should().Contain("ignore docs: -draft.txt (file)");
+        result.Stdout.Should().Contain("verdict: ignored");
+
+        var withoutTerminator = fixture.Cli("ignore", "-draft.txt");
+        withoutTerminator.ExitCode.Should().Be(1);
+        withoutTerminator.Stderr.Should().Contain("unknown option '-draft.txt'");
+    }
+
+    [Fact]
+    public void Command_DoesNotCreateTheStateDirectory()
+    {
+        using var fixture = new Fixture(ignoreText: "bin/\n");
+        Directory.Exists(fixture.StateDir).Should().BeFalse();
+        var before = Snapshot(fixture.Temp.Root);
+
+        var result = fixture.Cli("ignore", "bin/tool.exe");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        Directory.Exists(fixture.StateDir).Should().BeFalse();
+        Snapshot(fixture.Temp.Root).Should().Be(before);
+    }
+
+    [Fact]
     public void Command_LeavesTheStateDbAndFilesystemUnchanged()
     {
         using var fixture = new Fixture(ignoreText: "bin/\n");
@@ -271,7 +352,6 @@ public sealed class IgnoreExplainTests
             StateDir = _temp.Combine("state");
             Directory.CreateDirectory(DocsRoot);
             Directory.CreateDirectory(OtherRoot);
-            Directory.CreateDirectory(StateDir);
 
             if (ignoreText is not null)
                 _temp.Write("docs/.pdignore", ignoreText);
@@ -309,7 +389,7 @@ public sealed class IgnoreExplainTests
 
         public CliResult Cli(params string[] args)
         {
-            var all = args.Append("--config").Append(ConfigPath).ToArray();
+            var all = new[] { "--config", ConfigPath }.Concat(args).ToArray();
             var stdout = new StringWriter();
             var stderr = new StringWriter();
             var exit = CliApp.Run(all, stdout, stderr);

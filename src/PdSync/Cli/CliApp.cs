@@ -395,8 +395,17 @@ public static class CliApp
     private static int Ignore(PdsyncConfig config, CliArguments args, TextWriter output, TextWriter error)
     {
         var request = ResolveIgnoreRequest(config, args);
-        var rules = IgnoreRules.Load(request.Sync);
-        var decision = rules.Decide(request.RelativePath, request.IsDirectory);
+        IgnoreRules rules;
+        IgnoreDecision decision;
+        try
+        {
+            rules = IgnoreRules.Load(request.Sync);
+            decision = rules.Decide(request.RelativePath, request.IsDirectory);
+        }
+        catch (IgnoreRulesException ex)
+        {
+            throw new ConfigException($"ignore: {ex.Message}");
+        }
         var ruleInfo = decision.RuleNumber is int number
             ? rules.Rules.FirstOrDefault(rule => rule.Number == number)
             : null;
@@ -459,7 +468,7 @@ public static class CliApp
             throw new ConfigException("ignore: no enabled syncs selected");
 
         var expanded = PathUtil.Expand(raw);
-        if (Path.IsPathFullyQualified(expanded))
+        if (Path.IsPathRooted(expanded))
         {
             string absolute;
             try
@@ -523,6 +532,7 @@ public static class CliApp
             return config.Syncs.Where(s => s.Enabled).ToList();
 
         var result = new List<SyncConfig>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var name in names)
         {
             var match = config.Syncs.FirstOrDefault(s =>
@@ -531,7 +541,8 @@ public static class CliApp
                 throw new ConfigException($"unknown sync '{name}'");
             if (!match.Enabled)
                 throw new ConfigException($"sync '{name}' is disabled");
-            result.Add(match);
+            if (seen.Add(match.Name))
+                result.Add(match);
         }
         return result;
     }
@@ -650,6 +661,7 @@ public static class CliApp
             Options:
               --config <path>     explicit config file
               --sync <name>       select a sync by name (repeatable)
+              --                  end of options (e.g. ignore -- -draft.txt)
               --fast              incremental remote listing
               --full              force a complete remote listing
               --force             override the deletion budget
@@ -676,11 +688,21 @@ public static class CliApp
         public static CliArguments Parse(string[] args)
         {
             var result = new CliArguments();
+            var endOfOptions = false;
             for (var i = 0; i < args.Length; i++)
             {
                 var arg = args[i];
+                if (endOfOptions)
+                {
+                    result.AddPositional(arg);
+                    continue;
+                }
+
                 switch (arg)
                 {
+                    case "--":
+                        endOfOptions = true;
+                        break;
                     case "--config":
                         result.ConfigPath = Next(args, ref i, "--config");
                         break;
@@ -721,12 +743,8 @@ public static class CliApp
                             result.SyncNames.Add(arg["--sync=".Length..]);
                         else if (arg.StartsWith('-'))
                             throw new ArgumentException($"unknown option '{arg}'");
-                        else if (result.Command is null)
-                            result.Command = arg;
-                        else if (result.Command == "ignore" && result.PathArgument is null)
-                            result.PathArgument = arg;
                         else
-                            result.SyncNames.Add(arg);
+                            result.AddPositional(arg);
                         break;
                 }
             }
@@ -735,6 +753,16 @@ public static class CliApp
                 throw new ArgumentException("--fast and --full are mutually exclusive");
 
             return result;
+        }
+
+        private void AddPositional(string arg)
+        {
+            if (Command is null)
+                Command = arg;
+            else if (Command == "ignore" && PathArgument is null)
+                PathArgument = arg;
+            else
+                SyncNames.Add(arg);
         }
 
         private static string Next(string[] args, ref int index, string option)

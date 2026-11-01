@@ -194,11 +194,15 @@ Additional rules specific to sync:
    ancestor directory when an ignored parent is the deciding rule. A trailing
    `/` or `\` asks for directory intent; without it the path is treated as a
    file (the filesystem is not probed, so nonexistent paths still explain).
-   Relative paths resolve against the selected sync root; a rooted path resolves
-   against the sync root that contains it. A relative path with more than one
-   enabled sync is a config error asking for `--sync`. The command is strictly
-   read-only: it does not open or create the state DB, take the run lock, write
-   fast counters, or create logs. `--json` emits `command`, `sync`, `root`,
+   Relative paths resolve against the selected sync root; a rooted path (one
+   with a leading separator or drive/UNC prefix) resolves against the sync root
+   that contains it. A relative path with more than one selected sync is a
+   config error asking for `--sync`; repeated `--sync` values are deduplicated
+   case-insensitively. `--` ends option parsing, so `ignore -- -draft.txt` can
+   explain a dash-prefixed name. A malformed ignore pattern is reported as a
+   config error (exit 4) naming the pattern and its source line. The command is
+   strictly read-only: it does not open or create the state DB, take the run
+   lock, write fast counters, or create logs. `--json` emits `command`, `sync`, `root`,
    `ignoreFile`, `path`, `kind`, `ignored`, `verdict`, `pattern`, `rule`,
    `source`, `sourceKind`, `line`, and `matchedPath`.
 

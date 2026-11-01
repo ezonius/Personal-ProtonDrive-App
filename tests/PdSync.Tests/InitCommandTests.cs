@@ -255,20 +255,31 @@ public sealed class InitCommandTests : IDisposable
     }
 
     [Fact]
-    public void NoDiscoveredConfig_CreatesPdsyncYamlInTheCurrentDirectory()
+    public void DiscoveredYmlConfig_IsNeverOverwritten()
     {
-        var fallback = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "pdsync", "config.yaml");
-        if (File.Exists(fallback))
-            return; // A real user-level config would correctly be refused instead.
-
-        var local = _temp.Combine("fresh");
-        Directory.CreateDirectory(local);
+        var configPath = _temp.Write("pdsync.yml", "version: 1\n# yml sentinel\n");
 
         var result = WithEnvironment(
             ConfigLoader.ConfigEnvironmentVariable, null,
-            () => InDirectory(local, () => Cli("init", "--yes")));
+            () => InDirectory(_temp.Root, () => Cli("init", "--yes")));
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain(configPath);
+        result.Stderr.Should().Contain("refusing to overwrite");
+        File.ReadAllText(configPath).Should().Be("version: 1\n# yml sentinel\n");
+    }
+
+    [Fact]
+    public void NoDiscoveredConfig_CreatesPdsyncYamlInTheCurrentDirectory()
+    {
+        var local = _temp.Combine("fresh");
+        Directory.CreateDirectory(local);
+
+        // Inject a guaranteed-missing discovery result: a real user-level
+        // %APPDATA% config must not make this branch vacuous.
+        var result = WithEnvironment(
+            ConfigLoader.ConfigEnvironmentVariable, null,
+            () => InDirectory(local, () => CliWithDiscovery(() => null, "init", "--yes")));
 
         result.ExitCode.Should().Be(0, result.Stderr);
         var configPath = Path.GetFullPath(Path.Combine(local, "pdsync.yaml"));
@@ -277,15 +288,171 @@ public sealed class InitCommandTests : IDisposable
         File.Exists(Path.Combine(local, ".pdignore")).Should().BeTrue();
     }
 
-    private static CliResult Cli(params string[] args) => CliInput(null, args);
+    [Fact]
+    public void ConfigPathCollidingWithIgnoreFile_IsRejectedBeforeWriting()
+    {
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        var collision = Path.Combine(local, ".pdignore");
 
-    private static CliResult CliInput(string? stdin, params string[] args)
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", collision));
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain(collision);
+        result.Stderr.Should().Contain("config path and ignore path are the same file");
+        File.Exists(collision).Should().BeFalse();
+        File.Exists(Path.Combine(local, "pdsync.yaml")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void StdinEofWithoutYes_IsAConfigErrorAndWritesNothing()
+    {
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        var configPath = _temp.Combine("config", "pdsync.yaml");
+
+        var result = InDirectory(local, () => CliInput(string.Empty, "init", "--config", configPath));
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain("input closed before all prompts were answered");
+        File.Exists(configPath).Should().BeFalse();
+        File.Exists(Path.Combine(local, ".pdignore")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IgnoreDestinationThatIsADirectory_IsRejectedBeforeWritingConfig()
+    {
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        Directory.CreateDirectory(Path.Combine(local, ".pdignore"));
+        var configPath = _temp.Combine("config", "pdsync.yaml");
+
+        var result = InDirectory(local, () => Cli("init", "--yes", "--config", configPath));
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain("ignore path is a directory");
+        File.Exists(configPath).Should().BeFalse();
+    }
+
+    [Fact]
+    public void ConfigCreatedAfterTheProbe_IsRejectedByCreateNew()
+    {
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        var configDirectory = _temp.Combine("config");
+        Directory.CreateDirectory(configDirectory);
+        var configPath = Path.Combine(configDirectory, "pdsync.yaml");
+
+        // Simulate a racing writer landing between the initial File.Exists
+        // probe and the write: the first prompt read creates the file.
+        var reader = new CallbackTextReader(
+            $"{local}\ndocs\n/my-files/docs\n",
+            () => File.WriteAllText(configPath, "version: 1\n# racer\n"));
+
+        var result = CliWithReader(reader, "init", "--config", configPath);
+
+        result.ExitCode.Should().Be(4);
+        result.Stderr.Should().Contain("already exists");
+        result.Stderr.Should().Contain("refusing to overwrite");
+        File.ReadAllText(configPath).Should().Be("version: 1\n# racer\n");
+        File.Exists(Path.Combine(local, ".pdignore")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void IgnoreWriteFailure_RemovesConfigCreatedByThisInvocation()
+    {
+        if (!OperatingSystem.IsWindows())
+            return; // Read-only files are only enforced this way on Windows.
+
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        var ignoreFile = _temp.Write("docs/.pdignore", "# sentinel\n");
+        File.SetAttributes(ignoreFile, FileAttributes.ReadOnly);
+        var configPath = _temp.Combine("config", "pdsync.yaml");
+
+        try
+        {
+            var result = CliInput(
+                $"{local}\ndocs\n/my-files/docs\nyes\n",
+                "init", "--config", configPath);
+
+            result.ExitCode.Should().Be(4);
+            result.Stderr.Should().Contain("cannot write files");
+            File.Exists(configPath).Should().BeFalse("a failed ignore write must roll back the new config");
+            File.ReadAllText(ignoreFile).Should().Be("# sentinel\n");
+        }
+        finally
+        {
+            File.SetAttributes(ignoreFile, FileAttributes.Normal);
+        }
+    }
+
+    [Fact]
+    public void IrrelevantPositionalOrScanFlags_AreRejected()
+    {
+        var local = _temp.Combine("docs");
+        Directory.CreateDirectory(local);
+        var configPath = _temp.Combine("config", "pdsync.yaml");
+
+        var positional = InDirectory(local, () => Cli("init", "extra", "--yes", "--config", configPath));
+        positional.ExitCode.Should().Be(1);
+        positional.Stderr.Should().Contain("init accepts only");
+        File.Exists(configPath).Should().BeFalse();
+
+        var scanFlag = InDirectory(local, () => Cli("init", "--fast", "--config", configPath));
+        scanFlag.ExitCode.Should().Be(1);
+        scanFlag.Stderr.Should().Contain("init accepts only");
+        File.Exists(configPath).Should().BeFalse();
+    }
+
+    private static CliResult Cli(params string[] args) => CliRun(null, null, args);
+
+    private static CliResult CliInput(string? stdin, params string[] args) => CliRun(stdin, null, args);
+
+    private static CliResult CliWithDiscovery(Func<string?> discovery, params string[] args) =>
+        CliRun(null, discovery, args);
+
+    private static CliResult CliWithReader(TextReader reader, params string[] args)
+    {
+        var stdout = new StringWriter();
+        var stderr = new StringWriter();
+        var exit = CliApp.Run(args, stdout, stderr, desktopMappings: null, input: reader);
+        return new CliResult(exit, stdout.ToString(), stderr.ToString());
+    }
+
+    private static CliResult CliRun(string? stdin, Func<string?>? discovery, string[] args)
     {
         var stdout = new StringWriter();
         var stderr = new StringWriter();
         var exit = CliApp.Run(
-            args, stdout, stderr, desktopMappings: null, input: new StringReader(stdin ?? string.Empty));
+            args, stdout, stderr,
+            desktopMappings: null, input: new StringReader(stdin ?? string.Empty),
+            configDiscovery: discovery);
         return new CliResult(exit, stdout.ToString(), stderr.ToString());
+    }
+
+    private sealed class CallbackTextReader : TextReader
+    {
+        private readonly Queue<string> _lines;
+        private readonly Action _onFirstRead;
+        private bool _fired;
+
+        public CallbackTextReader(string stdin, Action onFirstRead)
+        {
+            _lines = new Queue<string>(stdin.Split('\n'));
+            _onFirstRead = onFirstRead;
+        }
+
+        public override string? ReadLine()
+        {
+            if (!_fired)
+            {
+                _fired = true;
+                _onFirstRead();
+            }
+
+            return _lines.Count == 0 ? null : _lines.Dequeue();
+        }
     }
 
     private static T InDirectory<T>(string directory, Func<T> action)

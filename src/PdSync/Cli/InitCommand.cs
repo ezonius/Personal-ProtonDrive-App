@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PdSync.Config;
+using YamlDotNet.Core;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
@@ -45,18 +46,23 @@ public static class InitCommand
         bool json,
         TextReader input,
         TextWriter output,
-        TextWriter error)
+        TextWriter error,
+        Func<string?>? findExistingConfig = null)
     {
         // Keep stdout machine-readable under --json: prompts and the overwrite
         // question are diagnostics, not output.
         var promptOutput = json ? error : output;
-        var configPath = ResolveTargetPath(explicitConfigPath);
+        Func<string?> discovery = findExistingConfig ?? (() => ConfigLoader.FindExisting());
+        var configPath = ResolveTargetPath(explicitConfigPath, discovery);
         if (File.Exists(configPath))
         {
             throw new ConfigException(
                 $"init: config file already exists: {configPath}; refusing to overwrite. " +
                 "Pass --config <other-path> or remove it first.");
         }
+
+        if (Directory.Exists(configPath))
+            throw new ConfigException($"init: config path is a directory: {configPath}");
 
         var defaultLocalRoot = PathUtil.TrimEnd(Path.GetFullPath(Environment.CurrentDirectory));
         string localRootInput;
@@ -99,10 +105,33 @@ public static class InitCommand
         // catches both invalid inputs and a serializer that emits something the
         // loader cannot read back.
         var yaml = Serialize(raw);
-        var validated = ConfigValidator.Validate(ConfigLoader.Deserialize(yaml), configPath);
+        RawConfig reparsed;
+        try
+        {
+            reparsed = ConfigLoader.Deserialize(yaml);
+        }
+        catch (YamlException ex)
+        {
+            throw new ConfigException($"init: generated config is not valid YAML: {ex.Message}");
+        }
+
+        var validated = ConfigValidator.Validate(reparsed, configPath);
         var sync = validated.Syncs[0];
 
         var ignoreFile = sync.IgnoreFile;
+        if (PathUtil.IdentityKey(configPath) == PathUtil.IdentityKey(ignoreFile))
+        {
+            throw new ConfigException(
+                $"init: config path and ignore path are the same file: {configPath}; " +
+                "pass a different --config path.");
+        }
+
+        if (Directory.Exists(ignoreFile))
+        {
+            throw new ConfigException(
+                $"init: ignore path is a directory: {ignoreFile}; remove it or choose another local root.");
+        }
+
         var ignoreExists = File.Exists(ignoreFile);
         var overwroteIgnore = false;
         if (ignoreExists)
@@ -120,17 +149,36 @@ public static class InitCommand
             overwroteIgnore = true;
         }
 
+        var configDirectory = Path.GetDirectoryName(configPath);
+        string? ignoreTemp = null;
+        var configCreated = false;
         try
         {
-            var configDirectory = Path.GetDirectoryName(configPath);
             if (!string.IsNullOrEmpty(configDirectory))
                 Directory.CreateDirectory(configDirectory);
 
-            File.WriteAllText(configPath, yaml);
-            File.WriteAllText(ignoreFile, DefaultIgnoreText + Environment.NewLine);
+            // FileMode.CreateNew makes the no-overwrite contract race-safe: a
+            // config created after the probe above is rejected instead of
+            // silently overwritten.
+            WriteNewConfig(configPath, yaml);
+            configCreated = true;
+
+            // Stage the ignore text next to its destination, then move it into
+            // place so a failed write never leaves a truncated ignore file.
+            ignoreTemp = ignoreFile + ".pdsync-init-" + Guid.NewGuid().ToString("N");
+            File.WriteAllText(ignoreTemp, DefaultIgnoreText + Environment.NewLine);
+            File.Move(ignoreTemp, ignoreFile, overwrite: true);
+            ignoreTemp = null;
+        }
+        catch (ConfigException)
+        {
+            throw;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            TryDelete(ignoreTemp);
+            if (configCreated)
+                TryDelete(configPath);
             throw new ConfigException($"init: cannot write files: {ex.Message}");
         }
 
@@ -163,7 +211,7 @@ public static class InitCommand
     /// target (and is then refused as an overwrite); with no existing config we
     /// create ./pdsync.yaml.
     /// </summary>
-    private static string ResolveTargetPath(string? explicitConfigPath)
+    private static string ResolveTargetPath(string? explicitConfigPath, Func<string?> findExistingConfig)
     {
         if (!string.IsNullOrWhiteSpace(explicitConfigPath))
             return Absolute(explicitConfigPath, "--config");
@@ -172,8 +220,54 @@ public static class InitCommand
         if (!string.IsNullOrWhiteSpace(fromEnvironment))
             return Absolute(fromEnvironment, ConfigLoader.ConfigEnvironmentVariable);
 
-        return ConfigLoader.FindExisting()
+        return findExistingConfig()
                ?? Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "pdsync.yaml"));
+    }
+
+    /// <summary>
+    /// Claims the config path exclusively. A concurrent creation after the
+    /// initial probe surfaces as the same exit-4 "already exists" error as a
+    /// config that existed up front.
+    /// </summary>
+    internal static void WriteNewConfig(string path, string yaml)
+    {
+        var created = false;
+        try
+        {
+            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            created = true;
+            using var writer = new StreamWriter(stream);
+            writer.Write(yaml);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (created)
+                TryDelete(path);
+
+            if (!created && File.Exists(path))
+            {
+                throw new ConfigException(
+                    $"init: config file already exists: {path}; refusing to overwrite. " +
+                    "Pass --config <other-path> or remove it first.");
+            }
+
+            throw new ConfigException($"init: cannot write config '{path}': {ex.Message}");
+        }
+    }
+
+    private static void TryDelete(string? path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return;
+
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Best effort rollback; the original write error is more useful.
+        }
     }
 
     private static string Absolute(string value, string field) =>
@@ -227,8 +321,9 @@ public static class InitCommand
         var line = input.ReadLine();
         if (line is null)
         {
-            output.WriteLine();
-            return fallback;
+            throw new ConfigException(
+                "init: input closed before all prompts were answered; " +
+                "rerun interactively or pass --yes for defaults.");
         }
 
         line = line.Trim();

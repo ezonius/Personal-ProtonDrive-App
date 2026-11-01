@@ -87,13 +87,21 @@ is refused as an overwrite; with no existing config it writes `./pdsync.yaml`.
 Prompts cover the local root (default: the current directory), the sync name
 (default: the local directory name, sanitized), and the remote root (default:
 `/my-files/<name>`). `--yes` accepts those defaults without prompting for
-scripted use. The generated YAML is serialized, reparsed through
+scripted use. End-of-input before all prompts are answered is a config error
+(exit 4), not an implicit acceptance of defaults; `--yes` is the only
+non-interactive path. The generated YAML is serialized, reparsed through
 `ConfigLoader`, and validated by `ConfigValidator` before either file is
-written, so invalid input exits 4 and leaves no partial config. An existing
-config is never overwritten (exit 4). An existing `.pdignore` is never
-overwritten under `--yes`; interactively it is replaced only after an explicit
-yes. `init` does not open or create the state DB, take the run lock, write fast
-counters or logs, or call the Proton CLI.
+written, so invalid input exits 4 and leaves no partial config. A config path
+that resolves to the same file as the ignore file is rejected (exit 4). An
+existing config is never overwritten (exit 4), including a config created
+concurrently after the initial probe (the write uses exclusive create). An
+existing `.pdignore` is never overwritten under `--yes`; interactively it is
+replaced only after an explicit yes. An ignore destination that is a directory
+is rejected before the config is written, and a failed ignore write rolls back
+a config created by this invocation. `init` does not open or create the state
+DB, take the run lock, write fast counters or logs, or call the Proton CLI.
+Positional sync names and the `--fast`/`--full` scan flags are not meaningful for
+`init` and are rejected as usage errors (exit 1).
 
 Exit codes:
 
@@ -109,7 +117,7 @@ Exit codes:
 
 ### 3.2 Config file
 
-Resolution order: `--config` → `PDSYNC_CONFIG` → `./pdsync.yaml` → `%APPDATA%\pdsync\config.yaml`.
+Resolution order: `--config` → `PDSYNC_CONFIG` → `./pdsync.yaml` → `./pdsync.yml` → `%APPDATA%\pdsync\config.yaml`.
 Paths support `~` and `${VAR}` / `%VAR%` expansion; all paths are resolved to absolute.
 
 ```yaml

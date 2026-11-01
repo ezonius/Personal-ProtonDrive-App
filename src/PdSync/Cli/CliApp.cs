@@ -29,7 +29,8 @@ public static class CliApp
         TextWriter output,
         TextWriter error,
         IDesktopMappingDetector? desktopMappings = null,
-        TextReader? input = null)
+        TextReader? input = null,
+        Func<string?>? configDiscovery = null)
     {
         CliArguments parsed;
         try
@@ -51,12 +52,21 @@ public static class CliApp
         if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init"))
             return Unknown(parsed.Command, error);
 
+        if (parsed.Command == "init" &&
+            (parsed.SyncNames.Count > 0 || parsed.Fast || parsed.Full))
+        {
+            error.WriteLine(
+                "pdsync: init accepts only --config, --yes, --json, --verbose, --interactive, and --no-color");
+            return 1;
+        }
+
         try
         {
             if (parsed.Command == "init")
             {
                 return InitCommand.Execute(
-                    parsed.ConfigPath, parsed.Yes, parsed.Json, input ?? Console.In, output, error);
+                    parsed.ConfigPath, parsed.Yes, parsed.Json,
+                    input ?? Console.In, output, error, configDiscovery);
             }
 
             var config = ConfigLoader.Load(parsed.ConfigPath);

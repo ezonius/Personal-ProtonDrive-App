@@ -298,10 +298,76 @@ public static class InitCommand
         if (relative is "." or "")
             return null;
 
+        // Windows accepts a path whose directory components differ from the
+        // on-disk casing. The scanner reports the on-disk names and ignore
+        // matching is case-sensitive, so derive the rule from the real casing
+        // or the generated config could still be uploaded.
+        if (OperatingSystem.IsWindows())
+            relative = ResolveOnDiskCasing(configPath, localRoot, relative);
+
         if (Path.DirectorySeparatorChar != '/')
             relative = relative.Replace(Path.DirectorySeparatorChar, '/');
 
         return relative;
+    }
+
+    /// <summary>
+    /// Rewrites each existing component of <paramref name="relative"/> to the
+    /// name reported by the filesystem. Components that do not exist yet (the
+    /// config file itself) keep the caller's spelling; an exact-case match is
+    /// preferred so a case-sensitive Windows directory is not rewritten. A
+    /// component the filesystem cannot describe safely is a config error: the
+    /// later ignore validation would compare the staged rule with the same
+    /// caller-cased path and could not detect the mismatch.
+    /// </summary>
+    private static string ResolveOnDiskCasing(string configPath, string localRoot, string relative)
+    {
+        var parts = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var current = localRoot;
+
+        for (var i = 0; i < parts.Length; i++)
+        {
+            var name = parts[i];
+            if (name.Length == 0 || name is "." or "..")
+            {
+                current = Path.Combine(current, name);
+                continue;
+            }
+
+            var candidate = Path.Combine(current, name);
+            if (i < parts.Length - 1 && File.Exists(candidate) && !Directory.Exists(candidate))
+            {
+                throw new ConfigException(
+                    $"init: cannot resolve on-disk casing for config path '{configPath}': " +
+                    $"'{candidate}' is a file where a directory is required.");
+            }
+
+            if (Directory.Exists(candidate) || File.Exists(candidate))
+            {
+                try
+                {
+                    var names = new DirectoryInfo(current)
+                        .EnumerateFileSystemInfos()
+                        .Select(entry => entry.Name)
+                        .ToList();
+
+                    name = names.FirstOrDefault(n => string.Equals(n, name, StringComparison.Ordinal))
+                           ?? names.FirstOrDefault(n => string.Equals(n, name, StringComparison.OrdinalIgnoreCase))
+                           ?? name;
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    throw new ConfigException(
+                        $"init: cannot resolve on-disk casing for config path '{configPath}': " +
+                        $"cannot list directory '{current}': {ex.Message}");
+                }
+            }
+
+            parts[i] = name;
+            current = Path.Combine(current, name);
+        }
+
+        return string.Join(Path.DirectorySeparatorChar, parts);
     }
 
     /// <summary>

@@ -109,10 +109,15 @@ Expected behavior, covered by `tests/PdSync.Tests/AuthExpiryTests.cs`:
 
 - A mid-run auth failure aborts the run with **exit code 3** (`ProtonAuthException`).
 - The failing CLI call is **never retried**; `invocations.jsonl` shows exactly
-  one attempt. This holds for idempotent reads too, and is separate from the
+  one attempt. CLI-level idempotent reads are covered separately by
+  `ProtonCliRetryTests.AuthFailure_IsNeverRetried`; this is distinct from the
   transient retry/backoff path in SPEC §6.4.
-- No transfer or deletion is performed for the failed action, and no later
-  action runs. Actions already committed before the failure stay committed.
+- No later action runs, and no state is committed for the failed action.
+  Actions already committed before the failure stay committed. When auth fails
+  before the primary CLI call (the covered cases), no transfer or deletion is
+  performed. A **post-transfer** auth failure — after a successful upload but
+  before verification or a staged rename — can leave a remote revision or a
+  `pdsync-upload-<id>` node behind; the next run reconciles it.
 - The failed action is **not committed to state**: its pending journal row is
   removed and the entry transaction rolls back. The next run re-plans it from
   the local and remote snapshots.

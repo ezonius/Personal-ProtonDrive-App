@@ -577,11 +577,14 @@ Retry policy (implementation in `ProtonCli`, `ProtonRetryOptions`):
   instead of risking a duplicate revision, folder, or trash operation.
 - **Auth failures are never retried** (`exit 3` stays `ProtonAuthException` and
   exit code 3). Permanent failures are not retried either. A mid-run auth
-  failure aborts the run, performs no action for the failed path, and commits no
-  state for it; already-committed actions remain. Recovery is
-  `proton-drive auth login` followed by a rerun, which re-plans the failed work
-  from snapshots. This is covered by deterministic fake-CLI tests
-  (`AuthExpiryTests`, `Category=AuthExpiry`) rather than a live expiry probe.
+  failure aborts the run: the failing CLI call is not retried, no later action
+  runs, and no state is committed for the failed action. Already-committed
+  actions remain. If auth expires after a transfer but before its verification
+  or staged rename, a remote revision or a `pdsync-upload-<id>` node may already
+  exist; the next run reconciles it. Recovery is `proton-drive auth login`
+  followed by a rerun, which re-plans the failed work from snapshots. S8
+  coverage is deterministic fake-CLI (`AuthExpiryTests`,
+  `Category=AuthExpiry`), not a live expiry probe.
 - Per-item `failedItems > 0` in upload/download JSON is treated as a permanent
   action failure; the executor's per-file retry path handles those.
 
@@ -905,8 +908,9 @@ cannot represent — that is the documented hard error.
    point `proton.cli` at its apphost, set `PDSYNC_FAKE_STATE`, seed a tree, and
    assert state plus `invocations.jsonl`. Smoke: `tools/FakeProtonCli/smoke.ps1`.
    S8 auth expiry is covered automatically (no live session) by
-   `AuthExpiryTests`: exit 3, one attempt, no failed/later action, and no state
-   commit for the failed action.
+   `AuthExpiryTests`: exit 3, one attempt, no later action, and no state commit
+   for the failed action; a post-transfer failure may leave a remote revision or
+   staged node that the next run reconciles.
 5. **Live smoke (opt-in)** — scratch remote folder `/my-files/pdsync-test`:
    create/modify/rename/delete both sides, conflict, ignore negation/anchoring, empty
    folders, large file, unicode names; then clean up.

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
@@ -10,8 +11,10 @@ namespace PdSync.Tests;
 
 /// <summary>
 /// S8 / SPEC §6.4: a session that expires in the middle of a run must abort with
-/// exit code 3, must not retry the auth failure, must not perform the failed or
-/// any later action, and must not commit state for the failed action.
+/// exit code 3, must not retry the auth failure, must not run any later action,
+/// and must not commit state for the failed action. If auth expires after a
+/// transfer but before its verification/rename, a remote change may already
+/// exist and is reconciled on the next run (not asserted as impossible here).
 ///
 /// These tests use FakeProtonCli fault injection, so they are fully
 /// deterministic and run in the normal suite. They never touch a real account or
@@ -35,6 +38,8 @@ public sealed class AuthExpiryTests
         var result = fixture.Cli("run");
 
         result.ExitCode.Should().Be(3);
+        // This is pdsync's own recovery UX (ProtonCli builds the message and
+        // CliApp prints it); it does not prove fake-CLI stderr propagation.
         result.Stderr.Should().Contain("proton-drive auth login",
             "the auth failure must tell the user how to recover");
 
@@ -80,6 +85,45 @@ public sealed class AuthExpiryTests
         File.Exists(fixture.LocalFull("c.txt")).Should().BeFalse();
         Directory.Exists(Path.Combine(fixture.StateDir, "trash")).Should().BeFalse();
 
+        fixture.CommittedPaths().Should().BeEquivalentTo("a.txt");
+        fixture.PendingCount().Should().Be(0);
+    }
+
+    [Fact]
+    public void Run_AuthExpiryDuringDownloadReplace_LeavesExistingLocalFileAndStateUntouched()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFiles("a.txt");
+        fixture.WriteLocal("a.txt", "remote-a.txt");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        // Create a newer remote revision while the local file stays unchanged,
+        // so the planner selects DownloadReplace over the existing local file.
+        var source = fixture.Temp.Write("remote-v2/a.txt", "remote-a-v2.txt");
+        File.SetLastWriteTimeUtc(source, DateTime.UtcNow);
+        fixture.Fake("fs", "upload", "--json", "--file-conflict-strategy", "create-new-revision",
+            source, "/my-files/root");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-a-v2.txt");
+
+        var beforeMtime = File.GetLastWriteTimeUtc(fixture.LocalFull("a.txt"));
+        var downloadsBefore = fixture.InvocationCount("download");
+        fixture.Scenario("""{ "rules": [ { "match": "fs download", "times": 0, "authExpired": true } ] }""");
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(3);
+        result.Stderr.Should().Contain("proton-drive auth login");
+
+        // The download fails once and is never retried; the existing local file
+        // is not replaced or moved to trash before the CLI call.
+        fixture.InvocationCount("download").Should().Be(downloadsBefore + 1);
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote-a.txt");
+        File.GetLastWriteTimeUtc(fixture.LocalFull("a.txt")).Should().Be(beforeMtime);
+        Directory.Exists(Path.Combine(fixture.StateDir, "trash")).Should().BeFalse();
+
+        // State still holds the previous revision, not the failed replacement.
+        fixture.CommittedEntry("a.txt").Sha1.Should().Be(Sha1("remote-a.txt"));
         fixture.CommittedPaths().Should().BeEquivalentTo("a.txt");
         fixture.PendingCount().Should().Be(0);
     }
@@ -170,6 +214,8 @@ public sealed class AuthExpiryTests
         public string FakeState { get; }
         public string ConfigPath { get; }
         public PdSync.Config.PdsyncConfig Config { get; }
+
+        public TempDirectory Temp => _temp;
 
         public string LocalFull(string relativePath) =>
             Path.Combine(Local, relativePath.Replace('/', Path.DirectorySeparatorChar));
@@ -300,6 +346,12 @@ public sealed class AuthExpiryTests
             return state.LoadEntries(includeFrozen: true).Select(e => e.Path).ToList();
         }
 
+        public EntryRecord CommittedEntry(string path)
+        {
+            using var state = StateStore.OpenReadOnly(Config, Config.Syncs.Single());
+            return state.LoadEntries(includeFrozen: true).Single(e => e.Path == path);
+        }
+
         public int PendingCount()
         {
             using var state = StateStore.OpenReadOnly(Config, Config.Syncs.Single());
@@ -349,6 +401,9 @@ public sealed class AuthExpiryTests
             return null;
         }
     }
+
+    private static string Sha1(string text) =>
+        Convert.ToHexString(SHA1.HashData(Encoding.UTF8.GetBytes(text))).ToLowerInvariant();
 
     private sealed record CliResult(int ExitCode, string Stdout, string Stderr);
 

@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using PdSync.Cli;
+using PdSync.Diagnostics;
 
 namespace PdSync.Tests;
 
@@ -446,6 +447,48 @@ public sealed class CliFakeTests
         result.Stdout.Should().Contain("\"ok\": true");
     }
 
+    [Fact]
+    public void Doctor_ReportsDesktopAppMappingOverlap()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+
+        var result = fixture.CliWithMappings(StubDesktopMappings.WithMappings(fixture.Local), "doctor");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("sync docs desktop-app overlap");
+        result.Stdout.Should().Contain(fixture.Local);
+        result.Stdout.Should().Contain("doctor: problems found");
+    }
+
+    [Fact]
+    public void Doctor_JsonIncludesDesktopMappingPath()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+
+        var result = fixture.CliWithMappings(StubDesktopMappings.WithMappings(fixture.Local), "doctor", "--json");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("\"desktopMappings\"");
+        result.Stdout.Should().Contain(fixture.Local.Replace("\\", "\\\\"));
+        result.Stdout.Should().Contain("sync docs desktop-app overlap");
+    }
+
+    [Fact]
+    public void Doctor_MalformedMappingsFileIsNonFatalWarning()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+
+        var result = fixture.CliWithMappings(
+            StubDesktopMappings.WithDiagnostic("cannot read desktop-app mappings: bad json"), "doctor");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("warn desktop-app mappings");
+        result.Stdout.Should().Contain("bad json");
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly TempDirectory _temp = new();
@@ -530,12 +573,15 @@ public sealed class CliFakeTests
                 }
                 """));
 
-        public CliResult Cli(params string[] args)
+        public CliResult Cli(params string[] args) =>
+            CliWithMappings(StubDesktopMappings.None, args);
+
+        public CliResult CliWithMappings(IDesktopMappingDetector detector, params string[] args)
         {
             var all = new[] { args[0], "--config", ConfigPath }.Concat(args.Skip(1)).ToArray();
             var stdout = new StringWriter();
             var stderr = new StringWriter();
-            var exit = CliApp.Run(all, stdout, stderr);
+            var exit = CliApp.Run(all, stdout, stderr, detector);
             return new CliResult(exit, stdout.ToString(), stderr.ToString());
         }
 
@@ -673,4 +719,24 @@ public sealed class CliFakeTests
     }
 
     private sealed record CliResult(int ExitCode, string Stdout, string Stderr);
+
+    private sealed class StubDesktopMappings : IDesktopMappingDetector
+    {
+        private readonly DesktopMappingScan _scan;
+
+        private StubDesktopMappings(DesktopMappingScan scan) => _scan = scan;
+
+        public static StubDesktopMappings None { get; } =
+            new(new DesktopMappingScan(Array.Empty<DesktopMapping>(), null));
+
+        public static StubDesktopMappings WithMappings(params string[] mappingRoots) =>
+            new(new DesktopMappingScan(
+                mappingRoots.Select(path => new DesktopMapping(path, "stub/Mappings.json")).ToArray(),
+                null));
+
+        public static StubDesktopMappings WithDiagnostic(string diagnostic) =>
+            new(new DesktopMappingScan(Array.Empty<DesktopMapping>(), diagnostic));
+
+        public DesktopMappingScan Detect() => _scan;
+    }
 }

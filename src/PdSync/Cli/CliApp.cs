@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using PdSync.Config;
+using PdSync.Diagnostics;
 using PdSync.Exec;
 using PdSync.Plan;
 using PdSync.Proton;
@@ -23,7 +24,11 @@ public static class CliApp
         Converters = { new JsonStringEnumConverter(JsonNamingPolicy.CamelCase) },
     };
 
-    public static int Run(string[] args, TextWriter output, TextWriter error)
+    public static int Run(
+        string[] args,
+        TextWriter output,
+        TextWriter error,
+        IDesktopMappingDetector? desktopMappings = null)
     {
         CliArguments parsed;
         try
@@ -52,7 +57,7 @@ public static class CliApp
             {
                 "plan" => Plan(config, parsed, output, error),
                 "run" => RunSync(config, parsed, output, error),
-                "doctor" => Doctor(config, parsed, output, error),
+                "doctor" => Doctor(config, parsed, output, error, desktopMappings ?? new DesktopMappingDetector()),
                 "status" => Status(config, parsed, output, error),
                 _ => Unknown(parsed.Command, error),
             };
@@ -217,10 +222,24 @@ public static class CliApp
         return exit;
     }
 
-    private static int Doctor(PdsyncConfig config, CliArguments args, TextWriter output, TextWriter error)
+    private static int Doctor(
+        PdsyncConfig config,
+        CliArguments args,
+        TextWriter output,
+        TextWriter error,
+        IDesktopMappingDetector desktopMappings)
     {
         var checks = new List<DoctorCheck>();
         var failed = false;
+
+        var mappingScan = desktopMappings.Detect();
+        var mappingDetail = mappingScan.Diagnostic is not null
+            ? mappingScan.Diagnostic
+            : mappingScan.Mappings.Count == 0
+                ? "no desktop-app mappings detected"
+                : $"{mappingScan.Mappings.Count} mapping(s): {string.Join(", ", mappingScan.Mappings.Select(mapping => mapping.LocalRoot))}";
+        checks.Add(new DoctorCheck("desktop-app mappings", mappingScan.Diagnostic is null, mappingDetail,
+            Warning: mappingScan.Diagnostic is not null));
 
         checks.Add(new DoctorCheck("config", true, config.ConfigPath));
         checks.Add(new DoctorCheck("stateDir", Directory.Exists(config.StateDir),
@@ -281,6 +300,14 @@ public static class CliApp
                 checks.Add(new DoctorCheck($"sync {sync.Name} remote", false, ex.Message));
             }
 
+            var overlap = DesktopMappingOverlapDetector.Find(sync.LocalRoot, mappingScan.Mappings);
+            if (overlap is not null)
+            {
+                failed = true;
+                checks.Add(new DoctorCheck($"sync {sync.Name} desktop-app overlap", false,
+                    $"{DescribeOverlap(overlap.Kind)}: {overlap.Mapping.LocalRoot} (mapping from {overlap.Mapping.SourceFile})"));
+            }
+
             try
             {
                 var dbPath = Path.Combine(config.StateDir, "state",
@@ -303,11 +330,24 @@ public static class CliApp
         }
 
         if (args.Json)
-            WriteJson(output, new { command = "doctor", ok = !failed, version, checks });
+        {
+            WriteJson(output, new
+            {
+                command = "doctor",
+                ok = !failed,
+                version,
+                desktopMappings = mappingScan.Mappings.Select(mapping => mapping.LocalRoot).ToArray(),
+                checks,
+            });
+        }
         else
         {
             foreach (var check in checks)
-                output.WriteLine($"{(check.Ok ? "ok  " : "FAIL")} {check.Name}: {check.Detail}");
+            {
+                var prefix = check.Warning ? "warn" : check.Ok ? "ok  " : "FAIL";
+                output.WriteLine($"{prefix} {check.Name}: {check.Detail}");
+            }
+
             output.WriteLine(failed ? "doctor: problems found" : "doctor: ok");
         }
 
@@ -433,7 +473,15 @@ public static class CliApp
             _ => action.Kind + " " + action.Path,
         };
 
-    private sealed record DoctorCheck(string Name, bool Ok, string Detail);
+    private sealed record DoctorCheck(string Name, bool Ok, string Detail, bool Warning = false);
+
+    private static string DescribeOverlap(DesktopMappingOverlapKind kind) => kind switch
+    {
+        DesktopMappingOverlapKind.Exact => "exact overlap with desktop-app mapping",
+        DesktopMappingOverlapKind.LocalRootInsideMapping => "local root is inside desktop-app mapping",
+        DesktopMappingOverlapKind.MappingInsideLocalRoot => "desktop-app mapping is inside local root",
+        _ => "overlap with desktop-app mapping",
+    };
 
     private static void WriteNothing(TextWriter output, bool json)
     {

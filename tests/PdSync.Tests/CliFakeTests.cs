@@ -991,6 +991,21 @@ public sealed class CliFakeTests
         result.Stdout.Should().Contain("upload new a.txt");
     }
 
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("run")]
+    [InlineData("doctor")]
+    public void LowerMinVersionOverride_AllowsDetectedCli(string command)
+    {
+        using var fixture = new Fixture(minVersion: "0.8.0");
+        fixture.SeedRoot();
+        fixture.Fake("__fake", "set-version", "0.9.0");
+
+        var result = fixture.Cli(command);
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+    }
+
     [Fact]
     public void Plan_RaisedMinVersionRejectsDefaultCli()
     {

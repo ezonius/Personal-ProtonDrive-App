@@ -62,6 +62,29 @@ public sealed class CliVersionTests
     }
 
     [Fact]
+    public void CompareTo_UsesNumericComponentsNotLexicalOrder()
+    {
+        CliVersion.TryParse("0.10.0", out var newerMinor).Should().BeTrue();
+        CliVersion.TryParse("0.9.0", out var lowerMinor).Should().BeTrue();
+        CliVersion.TryParse("0.9.10", out var newerPatch).Should().BeTrue();
+        CliVersion.TryParse("0.9.9", out var lowerPatch).Should().BeTrue();
+
+        newerMinor.CompareTo(lowerMinor).Should().BeGreaterThan(0);
+        lowerMinor.CompareTo(newerMinor).Should().BeLessThan(0);
+        newerMinor.IsAtLeast(lowerMinor).Should().BeTrue();
+        lowerMinor.IsAtLeast(newerMinor).Should().BeFalse();
+
+        newerPatch.CompareTo(lowerPatch).Should().BeGreaterThan(0);
+        lowerPatch.CompareTo(newerPatch).Should().BeLessThan(0);
+
+        // Exercise the same ordering through the gate used by plan/run/doctor.
+        ProtonVersionGate.Evaluate("proton-drive", "Fake Proton Drive CLI 0.10.0 (pdsync fake)", "0.9.0")
+            .Supported.Should().BeTrue();
+        ProtonVersionGate.Evaluate("proton-drive", "Fake Proton Drive CLI 0.9.10 (pdsync fake)", "0.9.9")
+            .Supported.Should().BeTrue();
+    }
+
+    [Fact]
     public void Prerelease_RanksBelowSameRelease()
     {
         CliVersion.TryParse("0.9.0-beta.1", out var prerelease).Should().BeTrue();

@@ -72,7 +72,7 @@ pdsync status [--json]           # last run per sync, pending conflicts
 pdsync ignore <path>             # explain which pattern matched (debug)
 pdsync trash list [--sync <name>] [--json]   # local trash inventory; never writes
 pdsync trash purge --older-than <days> [--dry-run] [--yes] [--sync <name>] [--json]
-pdsync history [sync]            # recent runs and actions
+pdsync history [sync...] [--limit N] [--json]  # recent runs and action totals; never writes
 pdsync rebuild <sync> --policy=… # rebuild state from local+remote (last resort)
 ```
 
@@ -101,6 +101,16 @@ is the only finding; a DB written by a newer schema remains a `FAIL` check
 `FAIL` check (exit 1). A malformed `.pdignore` is a config error (exit 4) in
 `doctor`, exactly as it is for `plan`, `run`, and `ignore`, and it is detected
 before any state probe so config errors always win.
+
+`history` reads the state DB read-only through the same no-create path as
+`plan`/`status`: it never creates or migrates the DB, takes no run lock, writes
+no logs, and calls no Proton command. It shows the most recent runs from the
+`runs` table (default 20, `--limit` 1..500) for the selected syncs, newest
+first. Action totals come from `stats_json` (`planned` plus
+`succeeded`/`failed`/`skipped`); a missing DB prints `no runs recorded` (empty
+`runs` in JSON) and exits 0, and malformed or absent `stats_json` keeps the row
+with a null summary. `--json` is stable camelCase, and both positional sync
+names and `--sync` filter the same way as other commands.
 
 `init` creates a config and a default `.pdignore`. It resolves the config
 location with the same order as loading: `--config` or `PDSYNC_CONFIG` always
@@ -961,8 +971,9 @@ truncated log without `run_finish`; readers must tolerate that.
 `logDir` must not be the same as or inside any sync's local root, analogous to
 `stateDir`; otherwise the next run would scan and upload its own logs. Logs are
 retained indefinitely in v1; there is no automatic pruning, rotation, or size
-cap. Operators manage retention themselves, and a future `history` command will
-read these files.
+cap. Operators manage retention themselves. The JSONL files remain available
+for per-action detail; `history` reads the `runs`/`stats_json` summary from the
+state DB and does not parse these logs.
 
 ---
 
@@ -1202,7 +1213,7 @@ call costs ~2–4 s.
 | M2 | Push path: create dirs, upload creates/revisions, verify, state commit **(done, live-smoked)** | Push-only sync converges; second run is a no-op |
 | M3 | Pull path: staged download, local trash, remote index **(done)**, executor **(done, live-smoked)** | Pull converges; interrupted download never corrupts a local file |
 | M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets; planner truth table **(done)**; executor/pending journal **(done, live-smoked)** | Truth-table suite green; live smoke passes; exit codes correct |
-| M5 | Polish: `status`, `history`, `rebuild`, JSON report, scheduler docs, published exe | Task Scheduler recipe works unattended for 7 days |
+| M5 | Polish: `status`, `history` **(done)**, `rebuild`, JSON report, scheduler docs, published exe | Task Scheduler recipe works unattended for 7 days |
 
 **Live smoke 2026-10-31:** `tools/live-smoke.ps1` passed against the real
 account with a unique `/my-files/pdsync-live-smoke-*` scratch root. It covered

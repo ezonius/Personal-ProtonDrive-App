@@ -49,7 +49,7 @@ public static class CliApp
             return parsed.ShowHelp ? 0 : 1;
         }
 
-        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init" or "trash"))
+        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init" or "trash" or "history"))
             return Unknown(parsed.Command, error);
 
         if (parsed.CleanupStaged && parsed.Command is not "run")
@@ -103,6 +103,7 @@ public static class CliApp
                 "run" => RunSync(config, parsed, output, error),
                 "doctor" => Doctor(config, parsed, output, error, desktopMappings ?? new DesktopMappingDetector()),
                 "status" => Status(config, parsed, output, error),
+                "history" => HistoryCommand.Execute(config, SelectSyncs(config, parsed.SyncNames), parsed.Limit, parsed.Json, output),
                 "ignore" => Ignore(config, parsed, output, error),
                 "trash" => Trash(config, parsed, input ?? Console.In, output, error),
                 _ => Unknown(parsed.Command, error),
@@ -866,6 +867,7 @@ public static class CliApp
               run  [sync...]      apply actions and commit state
               doctor              check CLI, auth, roots, state
               status [sync...]    recent runs and pending rows
+              history [sync...]   recent runs and action totals; never writes
               ignore <path>       explain the ignore rule for a path; never writes
               trash list          list local trash runs; never writes
               trash purge --older-than <days> [--dry-run] [--yes]
@@ -879,6 +881,7 @@ public static class CliApp
               --full              force a complete remote listing
               --force             override the deletion budget
               --cleanup-staged    run only: also trash adopted/historical staging leftovers
+              --limit <n>         maximum rows for listing commands (1..500, default 20)
               --json              machine-readable output
               --verbose           per-action output
               --yes               accept defaults; never overwrite existing files
@@ -900,6 +903,7 @@ public static class CliApp
         public bool ShowHelp { get; private set; }
         public bool DryRun { get; private set; }
         public int? OlderThanDays { get; private set; }
+        public int Limit { get; private set; } = 20;
         public bool UnexpectedPositional { get; private set; }
         public string? Subcommand { get; private set; }
         public string? PathArgument { get; private set; }
@@ -957,6 +961,9 @@ public static class CliApp
                     case "--older-than":
                         result.OlderThanDays = ParseDays(Next(args, ref i, "--older-than"));
                         break;
+                    case "--limit":
+                        result.Limit = ParseLimit(Next(args, ref i, "--limit"));
+                        break;
                     case "--interactive":
                         result.Interactive = true;
                         break;
@@ -973,6 +980,8 @@ public static class CliApp
                             result.SyncNames.Add(arg["--sync=".Length..]);
                         else if (arg.StartsWith("--older-than=", StringComparison.Ordinal))
                             result.OlderThanDays = ParseDays(arg["--older-than=".Length..]);
+                        else if (arg.StartsWith("--limit=", StringComparison.Ordinal))
+                            result.Limit = ParseLimit(arg["--limit=".Length..]);
                         else if (arg.StartsWith('-'))
                             throw new ArgumentException($"unknown option '{arg}'");
                         else
@@ -1001,6 +1010,13 @@ public static class CliApp
                     UnexpectedPositional = true;
                 SyncNames.Add(arg);
             }
+        }
+
+        private static int ParseLimit(string value)
+        {
+            if (!int.TryParse(value, out var limit) || limit < 1 || limit > 500)
+                throw new ArgumentException("--limit requires a number between 1 and 500");
+            return limit;
         }
 
         private static int ParseDays(string value)

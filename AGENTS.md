@@ -13,7 +13,7 @@ the fast orientation layer; when the two disagree, inspect the code and update
 ## 1. Project at a glance
 
 - **Goal:** declarative local↔remote sync pairs, `.pdignore` semantics, safe
-  two-way sync, `plan`/`run`/`doctor`/`status` commands.
+  two-way sync, `plan`/`run`/`doctor`/`status`/`history` commands.
 - **Stack:** C# 12, .NET 8 (LTS), WPF-free console app, single-file publish.
 - **Platform:** Windows-first; path handling is intended to work on Unix too.
 - **Remote API:** only the official `proton-drive.exe` CLI. There is **no**
@@ -46,10 +46,10 @@ pwsh -NoProfile -File tools/live-smoke.ps1
 
 `--fast`, `--full`, `--force`, `--cleanup-staged` (run only), `--json`,
 `--verbose`, `--interactive`, `--yes`, `--no-color`, `--config`, `--sync`,
-`--dry-run`, and `--policy` (rebuild only) are recognized. `init`, `plan`,
-`run`, `doctor`, `status`, `ignore`, `trash`, `init`, and `rebuild` are
-implemented; `history` is not. `ignore` reports the deciding rule for a path
-and is read-only.
+`--dry-run`, `--policy` (rebuild only), and `--limit` (listing commands) are
+recognized. `init`, `plan`, `run`, `doctor`, `status`, `history`, `ignore`,
+`trash`, and `rebuild` are implemented. `ignore` reports the deciding rule for
+a path and is read-only.
 
 ### Agent role skills
 
@@ -86,6 +86,7 @@ src/PdSync/
   Cli/CliApp.cs              argument parsing, command handlers, human/JSON output
   Cli/InitCommand.cs         `init`: prompts, generated config/.pdignore, no-overwrite
   Cli/TrashCommand.cs        `trash list|purge`: local retention, read-only list
+  Cli/HistoryCommand.cs      `history`: recent runs/action totals; read-only
   Cli/RebuildCommand.cs      `rebuild`: explicit-policy baseline recovery, backup/lock/confirm
   Diagnostics/
     DesktopMappingDetector.cs  read-only Proton Drive desktop-app Mappings.json probe
@@ -302,7 +303,7 @@ Implemented and fake-tested:
 - Remote index, case/collision detection, fast-subtree synthesis.
 - Pure planner: creates, updates, deletes, conflicts, renames, adoption,
   directory ordering, incomplete scans.
-- `init`, `plan`, `run`, `doctor`, `status` CLI.
+- `init`, `plan`, `run`, `doctor`, `status`, `history` CLI.
 - `ignore` CLI (SPEC §3.3 rule 7): resolves a relative or rooted path against a
   sync root and explains the deciding rule via `IgnoreRules.Decide` — verdict,
   pattern, rule number, ignore-file line or inline `exclude[i]`, and matched
@@ -322,6 +323,11 @@ Implemented and fake-tested:
 - `run --cleanup-staged` opt-in cleanup for adopted/historical
   `pdsync-upload-*` leftovers (Proton Trash only), plus a read-only `doctor`
   candidate report for those leftovers; normal runs and `plan` stay unchanged.
+- `history` CLI (SPEC §3.1): recent runs from the `runs` table, newest first,
+  with `--limit` (1..500, default 20), `--json`, positional sync names, and
+  `--sync`. Action totals come from `stats_json`; malformed/missing stats keep
+  the row with a null summary. Read-only: no DB create/migrate, lock, logs, or
+  Proton calls.
 
 Live smoke: **passed** on 2026-10-31 against the real account using the script
 in §5. It covered push, pull, both deletion directions, ignore behavior, and
@@ -333,10 +339,10 @@ Known gaps / likely next work:
 - Transient retry/backoff is implemented in `ProtonCli`
   (`ProtonRetryOptions`); FakeProtonCli scenario tests cover 429/5xx,
   exhaustion, permanent failures, auth, and timeout recovery.
-- `logDir` JSONL run/action/verification logging is implemented; `history`
-  does not read it yet.
-- `history` is not implemented; `rebuild` is implemented with explicit
-  `--policy`.
+- `logDir` JSONL run/action/verification logging is implemented and remains
+  available for per-action detail; `history` reads `runs.stats_json` instead of
+  parsing these logs.
+- `rebuild` is implemented with explicit `--policy`.
 - Interactive conflict prompting is not implemented; `ask` currently uses the
   non-interactive fallback.
 - S15 restore-by-UID is not wired (restore is not used by the sync engine yet).

@@ -444,6 +444,113 @@ public sealed class CliFakeTests
     }
 
     [Fact]
+    public void Run_CrossParentDirectoryRenameMovesThenRenamesWithoutThrashing()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFolder("moved");
+        fixture.WriteLocal("docs/a.txt", "alpha");
+        fixture.WriteLocal("docs/sub/b.txt", "beta");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        var uploadsBefore = fixture.InvocationCount("upload");
+        var trashBefore = fixture.InvocationCount("trash");
+        var movesBefore = fixture.InvocationCount("move");
+        var renamesBefore = fixture.InvocationCount("rename");
+        Directory.Move(fixture.LocalFull("docs"), fixture.LocalFull("moved/renamed"));
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        fixture.InvocationCount("move").Should().Be(movesBefore + 1);
+        fixture.InvocationCount("rename").Should().Be(renamesBefore + 1);
+        fixture.InvocationCount("upload").Should().Be(uploadsBefore);
+        fixture.InvocationCount("trash").Should().Be(trashBefore);
+        fixture.RemoteFile("/my-files/root/moved/renamed/a.txt").Should().Be("alpha");
+        fixture.RemoteFile("/my-files/root/moved/renamed/sub/b.txt").Should().Be("beta");
+        fixture.RemoteFile("/my-files/root/moved/docs/a.txt").Should().BeNull();
+        fixture.RemoteFile("/my-files/root/docs/a.txt").Should().BeNull();
+
+        var entries = fixture.Entries().Select(e => e.PathKey).ToList();
+        entries.Should().Contain(new[]
+        {
+            "moved/renamed", "moved/renamed/a.txt",
+            "moved/renamed/sub", "moved/renamed/sub/b.txt",
+        });
+        entries.Should().NotContain(key =>
+            key == "docs" || key.StartsWith("docs/", StringComparison.Ordinal) ||
+            key == "moved/docs" || key.StartsWith("moved/docs/", StringComparison.Ordinal));
+
+        // Second run: both journaled steps were committed, so nothing moves again.
+        var second = fixture.Cli("run");
+        second.ExitCode.Should().Be(0, second.Stderr);
+        fixture.InvocationCount("move").Should().Be(movesBefore + 1);
+        fixture.InvocationCount("rename").Should().Be(renamesBefore + 1);
+        fixture.InvocationCount("upload").Should().Be(uploadsBefore);
+        fixture.InvocationCount("trash").Should().Be(trashBefore);
+    }
+
+    [Fact]
+    public void Run_CrossParentDirectoryRenameAfterMoveThenRenameFailure_ConvergesWithoutDuplicate()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFolder("moved");
+        fixture.WriteLocal("docs/a.txt", "alpha");
+        fixture.WriteLocal("docs/sub/b.txt", "beta");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        var uploadsBefore = fixture.InvocationCount("upload");
+        var trashBefore = fixture.InvocationCount("trash");
+        var movesBefore = fixture.InvocationCount("move");
+        var renamesBefore = fixture.InvocationCount("rename");
+        Directory.Move(fixture.LocalFull("docs"), fixture.LocalFull("moved/renamed"));
+
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs rename", "times": 1, "exitCode": 1, "stderr": "injected rename failure" } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        // Step 1 (move) commits; step 2 (rename) fails and leaves the baseline
+        // at moved/docs, matching the remote.
+        var failed = fixture.Cli("run");
+        failed.ExitCode.Should().Be(1, failed.Stderr);
+        failed.Stdout.Should().Contain("injected rename failure");
+        fixture.InvocationCount("move").Should().Be(movesBefore + 1);
+        fixture.InvocationCount("rename").Should().Be(renamesBefore + 1);
+        fixture.RemoteFile("/my-files/root/moved/docs/a.txt").Should().Be("alpha");
+        fixture.RemoteFile("/my-files/root/moved/renamed/a.txt").Should().BeNull();
+
+        // The next run re-detects the remaining same-parent rename; the subtree is
+        // never re-uploaded and no duplicate moved/docs + moved/renamed pair exists.
+        var converged = fixture.Cli("run");
+        converged.ExitCode.Should().Be(0, converged.Stderr);
+        fixture.InvocationCount("move").Should().Be(movesBefore + 1);
+        fixture.InvocationCount("rename").Should().Be(renamesBefore + 2);
+        fixture.InvocationCount("upload").Should().Be(uploadsBefore);
+        fixture.InvocationCount("trash").Should().Be(trashBefore);
+        fixture.RemoteFile("/my-files/root/moved/renamed/a.txt").Should().Be("alpha");
+        fixture.RemoteFile("/my-files/root/moved/renamed/sub/b.txt").Should().Be("beta");
+        fixture.RemoteFile("/my-files/root/moved/docs/a.txt").Should().BeNull();
+
+        var entries = fixture.Entries().Select(e => e.PathKey).ToList();
+        entries.Should().Contain(new[]
+        {
+            "moved/renamed", "moved/renamed/a.txt",
+            "moved/renamed/sub", "moved/renamed/sub/b.txt",
+        });
+        entries.Should().NotContain(key =>
+            key == "moved/docs" || key.StartsWith("moved/docs/", StringComparison.Ordinal));
+
+        // A further run is a no-op.
+        var noop = fixture.Cli("run");
+        noop.ExitCode.Should().Be(0, noop.Stderr);
+        fixture.InvocationCount("move").Should().Be(movesBefore + 1);
+        fixture.InvocationCount("rename").Should().Be(renamesBefore + 2);
+        fixture.InvocationCount("upload").Should().Be(uploadsBefore);
+    }
+
+    [Fact]
     public void Run_RemoteDirectoryRenameMovesLocalSubtreeWithoutRedownloading()
     {
         using var fixture = new Fixture();

@@ -474,8 +474,7 @@ guarantees `plan` and `run` cannot disagree. Implementation:
 `src/PdSync/Plan/Planner.cs`. The remote snapshot is built from
 `ProtonCli` + `RemoteIndex` (`src/PdSync/Proton`, `src/PdSync/Remote`) and uses
 paths relative to the sync root; the absolute remote root is kept only for CLI
-calls. File renames are detected per §5.4; directory renames remain normal
-subtree operations.
+calls. File and directory renames are detected per §5.4.
 
 ### 5.1 Decision table
 
@@ -589,7 +588,7 @@ adoption engine.
   (or a single move if the parent is unchanged). Ambiguous matches fall back to
   trash + upload.
 - Renames are **never** inferred from mtime alone.
-- **Directory renames** are detected in both directions and applied as one
+- **Directory renames** are detected in both directions and applied as a
   subtree move; the children never produce their own trash/upload actions.
   - **Local-initiated.** Baseline directory P is gone from the local scan (its
     whole local subtree is absent); a new local directory Q exists that is
@@ -610,20 +609,36 @@ adoption engine.
     back to normal remote-only handling. A destination that already exists
     locally or in the baseline is a blocking conflict.
   - **CLI calls.** A same-parent rename is a single `fs rename`. A cross-parent
-    move is `fs move <P> <parent(Q)>` followed by `fs rename
-    <parent(Q)/<nameP>> <nameQ>` when the leaf also changed. State rewrites
-    every descendant `entries` row to the Q prefix inside the same transaction
-    as the pending row; `remote_uid`, `remote_rev_uid`, sha1s, sizes and
-    `frozen` flags are preserved.
+    move with an unchanged leaf is a single `fs move`. A cross-parent move whose
+    leaf also changes is planned as **two journaled actions**: (1) a move-only
+    `fs move <P> <parent(Q)>` that keeps the old leaf, and (2) a same-parent
+    `fs rename <parent(Q)/<nameP>> <nameQ>`. Each action gets its own pending
+    row and its own state transaction. A failure after step 1 (including process
+    death) leaves the baseline matching the remote at
+    `<parent(Q)/<nameP>>`, so the next run re-detects and completes only the
+    rename instead of uploading a duplicate subtree. Remote paths come from the
+    remote snapshot: the source entry's `Path` and the resolved destination
+    parent's `Path`, with parents compared by folded key and the moved leaf
+    taken from the remote entry. State rewrites every descendant `entries` row
+    to the new prefix inside the same transaction as the pending row;
+    `remote_uid`, `remote_rev_uid`, sha1s, sizes and `frozen` flags are
+    preserved.
   - **Ignored and skipped paths.** A directory move is detected only when the old
     and new subtrees contain no ignored or skipped path in any snapshot; an
     ignored child would otherwise be smuggled along by the move. Such a rename
-    falls back to today's per-child behaviour.
+    falls back to today's per-child rules. When the ignored/skipped path exists
+    only on the remote side of the old directory, the fallback is not a quiet
+    per-child move: the remote subtree no longer matches the baseline, so
+    deleting the old local directory raises a blocking
+    `DirectoryDeleteVsModify` conflict (exit 2) and nothing is trashed.
   - **Nesting.** Only the topmost directory of a moved subtree emits an action;
     descendants and file-rename candidates inside the old/new prefixes are
     claimed by that move.
-  - Detection is disabled when `detectRenames` is false, when either scan is
-    incomplete, and in a skipped/fast-mode remote subtree.
+  - Detection is disabled when `detectRenames` is false or when either scan is
+    incomplete. Fast-mode skipped remote subtrees are synthesized from the
+    baseline and keep `IsComplete` true, so detection is not literally disabled
+    there; this is safe because the skip predicate guarantees the local subtree
+    was unchanged, and a local directory rename makes it change.
 
 #### 5.4.1 Case handling: folded identity, casing is local
 

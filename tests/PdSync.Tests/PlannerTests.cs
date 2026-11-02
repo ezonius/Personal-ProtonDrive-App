@@ -638,6 +638,148 @@ public sealed class PlannerTests
     }
 
     [Fact]
+    public void LocalDirectoryRename_CrossParentAndLeafChangeEmitTwoSteps()
+    {
+        var baseline = new[]
+        {
+            BaselineFolder("docs", "uid-docs"),
+            BaselineFile("docs/a.txt", "a", ShaA, "uid-a", "rev-a"),
+            BaselineFolder("moved", "uid-moved"),
+        };
+        var local = Scan(
+            LocalDirectory("moved"),
+            LocalDirectory("moved/renamed"),
+            Local("moved/renamed/a.txt", "a", 1000));
+        var remote = Remote(
+            RemoteDirectory("docs", "uid-docs"),
+            RemoteFile("docs/a.txt", "uid-a", "rev-a", "a", ShaA),
+            RemoteDirectory("moved", "uid-moved"));
+
+        var result = Plan(baseline, local, remote);
+
+        var moves = result.Actions
+            .Where(a => a.Kind == PlanActionKind.RemoteDirectoryMove)
+            .OrderBy(a => a.Step)
+            .ToList();
+        moves.Should().HaveCount(2);
+        moves[0].Path.Should().Be("docs");
+        moves[0].SecondaryPath.Should().Be("moved/docs");
+        moves[1].Path.Should().Be("moved/docs");
+        moves[1].SecondaryPath.Should().Be("moved/renamed");
+        result.Actions.Should().NotContain(a => a.IsDelete);
+        result.Actions.Should().NotContain(a => a.IsUpload || a.IsDownload);
+        result.Conflicts.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void LocalDirectoryRename_CrossParentIntermediateNameTakenFallsBack()
+    {
+        var baseline = new[]
+        {
+            BaselineFolder("docs", "uid-docs"),
+            BaselineFile("docs/a.txt", "a", ShaA, "uid-a", "rev-a"),
+            BaselineFolder("moved", "uid-moved"),
+        };
+        var local = Scan(
+            LocalDirectory("moved"),
+            LocalDirectory("moved/renamed"),
+            Local("moved/renamed/a.txt", "a", 1000));
+        var remote = Remote(
+            RemoteDirectory("docs", "uid-docs"),
+            RemoteFile("docs/a.txt", "uid-a", "rev-a", "a", ShaA),
+            RemoteDirectory("moved", "uid-moved"),
+            // Occupies the intermediate path the two-step move would need.
+            RemoteDirectory("moved/docs", "uid-unrelated"));
+
+        var result = Plan(baseline, local, remote);
+
+        result.Actions.Should().NotContain(a => a.Kind == PlanActionKind.RemoteDirectoryMove);
+        result.Actions.Should().Contain(a => a.Kind == PlanActionKind.RemoteTrash);
+        result.Actions.Should().Contain(a => a.Kind == PlanActionKind.CreateRemoteDirectory &&
+                                            a.Path == "moved/renamed");
+    }
+
+    [Fact]
+    public void LocalDirectoryRename_ExtraRemoteChildBlocksTheMove()
+    {
+        var baseline = new[]
+        {
+            BaselineFolder("docs", "uid-docs"),
+            BaselineFile("docs/a.txt", "a", ShaA, "uid-a", "rev-a"),
+        };
+        var local = Scan(LocalDirectory("renamed"), Local("renamed/a.txt", "a", 1000));
+        var remote = Remote(
+            RemoteDirectory("docs", "uid-docs"),
+            RemoteFile("docs/a.txt", "uid-a", "rev-a", "a", ShaA),
+            RemoteFile("docs/extra.txt", "uid-extra", "rev-extra", "extra", ShaOf("extra")));
+
+        var result = Plan(baseline, local, remote);
+
+        result.Actions.Should().NotContain(a => a.Kind == PlanActionKind.RemoteDirectoryMove);
+        result.Conflicts.Should().ContainSingle()
+            .Which.Kind.Should().Be(PlanConflictKind.DirectoryDeleteVsModify);
+    }
+
+    [Fact]
+    public void LocalDirectoryRename_RemoteIgnoredChildBlocksTheMoveWithAConflict()
+    {
+        using var temp = new TempDirectory();
+        var ignorePath = temp.Write(".pdignore", "secret.txt\n");
+        var rules = IgnoreRules.Load(ignorePath, Array.Empty<string>(), IgnoreCasePolicy.Sensitive);
+
+        var baseline = new[]
+        {
+            BaselineFolder("docs", "uid-docs"),
+            BaselineFile("docs/a.txt", "a", ShaA, "uid-a", "rev-a"),
+        };
+        var local = ScanWith(
+            entries: [LocalDirectory("renamed"), Local("renamed/a.txt", "a", 1000)],
+            rules: rules);
+        var remote = Remote(
+            RemoteDirectory("docs", "uid-docs"),
+            RemoteFile("docs/a.txt", "uid-a", "rev-a", "a", ShaA),
+            RemoteFile("docs/secret.txt", "uid-secret", "rev-secret", "secret", ShaOf("secret")));
+
+        var result = Plan(baseline, local, remote);
+
+        result.Actions.Should().NotContain(a => a.Kind == PlanActionKind.RemoteDirectoryMove);
+        result.Actions.Should().NotContain(a => a.IsDelete);
+        result.Conflicts.Should().ContainSingle()
+            .Which.Kind.Should().Be(PlanConflictKind.DirectoryDeleteVsModify);
+    }
+
+    [Fact]
+    public void LocalDirectoryRename_UsesRemoteCasingForMovePaths()
+    {
+        var baseline = new[]
+        {
+            BaselineFolder("PARENT", "uid-parent"),
+            BaselineFolder("docs", "uid-docs"),
+            BaselineFile("docs/a.txt", "a", ShaA, "uid-a", "rev-a"),
+        };
+        var local = Scan(
+            LocalDirectory("parent"),
+            LocalDirectory("parent/renamed"),
+            Local("parent/renamed/a.txt", "a", 1000));
+        var remote = Remote(
+            RemoteDirectory("PARENT", "uid-parent"),
+            RemoteDirectory("docs", "uid-docs"),
+            RemoteFile("docs/a.txt", "uid-a", "rev-a", "a", ShaA));
+
+        var result = Plan(baseline, local, remote);
+
+        var moves = result.Actions
+            .Where(a => a.Kind == PlanActionKind.RemoteDirectoryMove)
+            .OrderBy(a => a.Step)
+            .ToList();
+        moves.Should().HaveCount(2);
+        moves[0].Path.Should().Be("docs");
+        moves[0].SecondaryPath.Should().Be("PARENT/docs");
+        moves[1].Path.Should().Be("PARENT/docs");
+        moves[1].SecondaryPath.Should().Be("PARENT/renamed");
+    }
+
+    [Fact]
     public void LocalDirectoryRename_CaseOnlyIsANoOp()
     {
         var baseline = new[]

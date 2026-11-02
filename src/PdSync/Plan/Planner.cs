@@ -101,17 +101,50 @@ public static class Planner
 
         foreach (var (sourceKey, target) in localDirectoryRenames)
         {
-            var b = baseByKey[sourceKey];
-            // A destination whose remote parent does not exist would leave the
-            // moved subtree unreachable; refuse rather than emit a partial move.
-            if (!TargetParentRemoteExists(target.Path, remote))
-                throw new PlanException(
-                    $"cannot move remote directory '{b.Path}' to '{target.Path}': the remote parent is missing");
+            var remoteSource = remote.Get(sourceKey);
+            if (remoteSource is null || !remoteSource.IsDirectory)
+                continue; // detection required it; be defensive rather than guess casing
 
-            actions.Add(new PlanAction(PlanActionKind.RemoteDirectoryMove, b.Path, sourceKey,
-                SecondaryPath: target.Path,
-                RemoteUid: remote.Get(sourceKey)?.Uid,
-                Reason: "local directory was renamed; move the remote subtree"));
+            // Remote paths must come from the remote snapshot: local/baseline
+            // casing is not authoritative on a case-sensitive remote.
+            var sourcePath = remoteSource.Path;
+            var sourceLeaf = Leaf(sourcePath);
+            var targetLeaf = Leaf(target.Path);
+            var targetParent = ParentPath(target.Path);
+            var targetParentRemotePath = targetParent.Length == 0
+                ? string.Empty
+                : remote.Get(PathKey.Fold(targetParent))?.Path ?? targetParent;
+            var finalTarget = CombineRemotePath(targetParentRemotePath, targetLeaf);
+
+            if (string.Equals(PathKey.Fold(ParentPath(sourcePath)),
+                    PathKey.Fold(targetParent), StringComparison.Ordinal))
+            {
+                // Same parent: a single `fs rename` is failure-safe on its own.
+                actions.Add(new PlanAction(PlanActionKind.RemoteDirectoryMove, sourcePath, sourceKey,
+                    SecondaryPath: finalTarget,
+                    RemoteUid: remoteSource.Uid,
+                    Reason: "local directory was renamed; rename the remote directory"));
+                continue;
+            }
+
+            // Cross-parent: journal the move and the rename separately so a
+            // failure between them leaves the baseline matching the remote and
+            // the next run re-detects/re-runs only the remaining step.
+            var intermediateTarget = CombineRemotePath(targetParentRemotePath, sourceLeaf);
+            actions.Add(new PlanAction(PlanActionKind.RemoteDirectoryMove, sourcePath, sourceKey,
+                SecondaryPath: intermediateTarget,
+                RemoteUid: remoteSource.Uid,
+                Reason: "local directory was renamed; move the remote subtree to the new parent",
+                Step: 0));
+
+            if (!string.Equals(PathKey.Fold(sourceLeaf), PathKey.Fold(targetLeaf), StringComparison.Ordinal))
+            {
+                actions.Add(new PlanAction(PlanActionKind.RemoteDirectoryMove,
+                    intermediateTarget, PathKey.Fold(intermediateTarget),
+                    SecondaryPath: finalTarget,
+                    Reason: "local directory was renamed; rename it after the cross-parent move",
+                    Step: 1));
+            }
         }
 
         foreach (var (sourceKey, target) in remoteDirectoryRenames)
@@ -672,6 +705,11 @@ public static class Planner
                 // one step; treat the rename as ambiguous and fall back.
                 if (!TargetParentRemoteExists(candidate.Path, remote))
                     continue;
+                // A cross-parent move that also changes the leaf passes through
+                // <targetParent>/<oldLeaf>; it must be free or `fs move` fails
+                // forever with "name already exists".
+                if (!IntermediateTargetFree(oldRemote, candidate.Path, local, remote, allBaseKeys))
+                    continue;
                 if (!LocalSubtreeMatchesMovedBase(b.PathKey, candidate.PathKey, baseByKey, local))
                     continue;
                 candidates.Add(candidate);
@@ -896,12 +934,41 @@ public static class Planner
 
     private static bool TargetParentRemoteExists(string targetPath, RemoteSnapshot remote)
     {
-        var slash = targetPath.LastIndexOf('/');
-        if (slash < 0)
+        var parentPath = ParentPath(targetPath);
+        if (parentPath.Length == 0)
             return true;
 
-        var parent = remote.Get(PathKey.Fold(targetPath[..slash]));
+        var parent = remote.Get(PathKey.Fold(parentPath));
         return parent is not null && parent.IsDirectory;
+    }
+
+    /// <summary>
+    /// A cross-parent directory move that also changes the leaf is carried out
+    /// as two journaled steps and passes through the intermediate path
+    /// <c>&lt;targetParent&gt;/&lt;oldLeaf&gt;</c>. That path must be free in the
+    /// remote, local, and baseline snapshots before planning the move.
+    /// </summary>
+    private static bool IntermediateTargetFree(
+        RemoteEntry remoteSource,
+        string targetPath,
+        LocalScan local,
+        RemoteSnapshot remote,
+        IReadOnlySet<string> allBaseKeys)
+    {
+        var targetParent = ParentPath(targetPath);
+        if (string.Equals(PathKey.Fold(ParentPath(remoteSource.Path)),
+                PathKey.Fold(targetParent), StringComparison.Ordinal))
+            return true;
+
+        var sourceLeaf = Leaf(remoteSource.Path);
+        if (string.Equals(PathKey.Fold(sourceLeaf), PathKey.Fold(Leaf(targetPath)),
+                StringComparison.Ordinal))
+            return true; // intermediate == final, already checked remote-absent
+
+        var intermediateKey = PathKey.Fold(CombineRemotePath(targetParent, sourceLeaf));
+        return remote.Get(intermediateKey) is null &&
+               !local.ByKey.ContainsKey(intermediateKey) &&
+               !allBaseKeys.Contains(intermediateKey);
     }
 
     /// <summary>
@@ -1568,6 +1635,15 @@ public static class Planner
         return slash < 0 ? relativePath : relativePath[(slash + 1)..];
     }
 
+    private static string ParentPath(string relativePath)
+    {
+        var slash = relativePath.LastIndexOf('/');
+        return slash < 0 ? string.Empty : relativePath[..slash];
+    }
+
+    private static string CombineRemotePath(string parentPath, string leaf) =>
+        parentPath.Length == 0 ? leaf : parentPath + "/" + leaf;
+
     private static bool IsUnderAny(string key, IEnumerable<string> prefixes) =>
         prefixes.Any(prefix => IsUnder(key, prefix));
 
@@ -1583,6 +1659,10 @@ public static class Planner
         var byOrder = a.Order.CompareTo(b.Order);
         if (byOrder != 0)
             return byOrder;
+
+        var byStep = a.Step.CompareTo(b.Step);
+        if (byStep != 0)
+            return byStep;
 
         var byPath = StringComparer.Ordinal.Compare(a.Path, b.Path);
         if (byPath != 0)

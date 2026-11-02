@@ -54,8 +54,8 @@ public sealed class Executor
     private readonly SyncConfig _sync;
     private readonly ProtonCli _cli;
     private readonly StateStore _state;
-    private readonly IReadOnlyList<EntryRecord> _baseline;
-    private readonly IReadOnlyDictionary<string, EntryRecord> _baseByKey;
+    private IReadOnlyList<EntryRecord> _baseline;
+    private IReadOnlyDictionary<string, EntryRecord> _baseByKey;
     private readonly LocalScan _local;
     private readonly RemoteSnapshot _remote;
     private readonly PlanResult _plan;
@@ -173,6 +173,11 @@ public sealed class Executor
                     _failedKeys.Add(action.PathKey);
                     if (action.IsDelete)
                         _failedPrefixes.Add(action.PathKey + "/");
+                    // A failed cross-parent step 1 must suppress step 2:
+                    // its intermediate source path does not exist yet.
+                    if (action.Kind == PlanActionKind.RemoteDirectoryMove &&
+                        action.SecondaryPath is not null)
+                        _failedKeys.Add(PathKey.Fold(action.SecondaryPath));
                     _output.WriteLine($"FAILED {Describe(action)}: {ex.Message}");
                 }
             }
@@ -465,35 +470,56 @@ public sealed class Executor
         MoveState(action, target);
     }
 
+    /// <summary>
+    /// Applies exactly one CLI call for a directory move. A cross-parent rename
+    /// is planned as two separate actions (move, then same-parent rename), each
+    /// with its own pending journal row and state commit, so a failure between
+    /// the calls is re-detected and completed by the next run.
+    /// </summary>
     private void MoveRemoteDirectory(PlanAction action)
     {
         var target = action.SecondaryPath
             ?? throw new SyncException("remote directory move has no target");
-        var sourceFull = RemoteFull(action.Path);
+
+        // Use remote-snapshot casing for the source and resolved parent. Local
+        // and baseline casing can legitimately differ (folded adoption), and the
+        // remote is case-sensitive.
+        var sourceEntry = _remote.GetByUid(action.RemoteUid) ?? _remote.Get(action.PathKey);
+        var sourcePath = sourceEntry?.Path ?? action.Path;
+        var sourceFull = RemoteFull(sourcePath);
+        var (sourceParent, sourceName) = SplitRelative(sourcePath);
         var (targetParent, targetName) = SplitRelative(target);
-        var (sourceParent, sourceName) = SplitRelative(action.Path);
+        var crossParent = !string.Equals(PathKey.Fold(sourceParent),
+            PathKey.Fold(targetParent), StringComparison.Ordinal);
 
-        // The planner only emits a directory move when the destination parent is
-        // present in the remote snapshot; re-check so a stale plan cannot move a
-        // folder into a missing parent.
-        if (targetParent.Length > 0)
+        if (!crossParent)
         {
-            var parent = _remote.Get(PathKey.Fold(targetParent));
-            if (parent is null || !parent.IsDirectory)
-                throw new SyncException(
-                    $"remote parent for directory move is missing: {targetParent}");
-        }
-
-        if (string.Equals(sourceParent, targetParent, StringComparison.Ordinal))
-        {
+            // Same-parent rename; nothing to move.
             if (!string.Equals(sourceName, targetName, StringComparison.Ordinal))
                 _cli.Rename(sourceFull, targetName);
         }
         else
         {
-            _cli.Move(sourceFull, RemoteFull(targetParent));
-            if (!string.Equals(sourceName, targetName, StringComparison.Ordinal))
-                _cli.Rename(RemoteFull(targetParent) + "/" + sourceName, targetName);
+            // The move-only step keeps the old leaf by contract.
+            if (!string.Equals(PathKey.Fold(sourceName), PathKey.Fold(targetName),
+                    StringComparison.Ordinal))
+                throw new SyncException(
+                    $"cross-parent directory move must keep the old leaf: {sourcePath} -> {target}");
+
+            var targetParentFull = string.Empty;
+            if (targetParent.Length > 0)
+            {
+                // The planner only emits a directory move when the destination
+                // parent is present in the remote snapshot; re-check so a stale
+                // plan cannot move a folder into a missing parent.
+                var parent = _remote.Get(PathKey.Fold(targetParent));
+                if (parent is null || !parent.IsDirectory)
+                    throw new SyncException(
+                        $"remote parent for directory move is missing: {targetParent}");
+                targetParentFull = parent.Path;
+            }
+
+            _cli.Move(sourceFull, RemoteFull(targetParentFull));
         }
 
         RewriteMovedSubtree(action, target);
@@ -516,8 +542,10 @@ public sealed class Executor
     /// <summary>
     /// Rewrites every baseline row at or under the moved directory in one
     /// transaction (the caller already wraps this in one with the pending row).
-    /// Remote uids, revisions, digests, sizes and frozen flags are preserved; only
-    /// <c>path</c> and <c>path_key</c> change.
+    /// Remote uids, revisions, digests, sizes and frozen flags are preserved;
+    /// <c>path</c>, <c>path_key</c>, and <c>last_synced_at</c> change. The
+    /// in-memory baseline is updated too so a follow-up step (a cross-parent
+    /// rename) rewrites the already-moved subtree rather than the original one.
     /// </summary>
     private void RewriteMovedSubtree(PlanAction action, string target)
     {
@@ -532,13 +560,20 @@ public sealed class Executor
         if (rows.Count == 0)
             throw new SyncException($"baseline subtree is missing for directory move {action.Path}");
 
-        var targetKey = PathKey.Fold(target);
+        // Use the baseline's own root path for suffix removal. The action path may
+        // carry remote casing, and slicing the folded key would lowercase the
+        // descendant suffix.
+        var root = rows.FirstOrDefault(row => row.PathKey == sourceKey)
+            ?? throw new SyncException($"baseline root row is missing for directory move {action.Path}");
         var rewrites = new List<EntryRecord>(rows.Count);
         foreach (var row in rows)
         {
-            var suffix = row.Path.StartsWith(action.Path, StringComparison.Ordinal)
-                ? row.Path[action.Path.Length..]
-                : row.PathKey[sourceKey.Length..];
+            var suffix = row.PathKey == sourceKey
+                ? string.Empty
+                : row.Path.StartsWith(root.Path, StringComparison.Ordinal)
+                    ? row.Path[root.Path.Length..]
+                    : throw new SyncException(
+                        $"baseline row '{row.Path}' is not under move root '{root.Path}'");
             var newPath = target + suffix;
             rewrites.Add(row with
             {
@@ -552,6 +587,14 @@ public sealed class Executor
             _state.DeleteEntry(row.PathKey);
         foreach (var row in rewrites)
             _state.UpsertEntry(row);
+
+        var rewrittenKeys = new HashSet<string>(rows.Select(r => r.PathKey), StringComparer.Ordinal);
+        var updated = _baseline
+            .Where(e => !rewrittenKeys.Contains(e.PathKey))
+            .Concat(rewrites)
+            .ToList();
+        _baseline = updated;
+        _baseByKey = updated.ToDictionary(e => e.PathKey, StringComparer.Ordinal);
     }
 
     private void MoveState(PlanAction action, string target)

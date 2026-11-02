@@ -19,12 +19,15 @@ public enum PlanActionKind
     KeepBothUpload,
     RemoteMove,
     LocalMove,
-    RemoteDirectoryMove,
-    LocalDirectoryMove,
     LocalTrash,
     RemoteTrash,
     CleanupStagedUpload,
     DropBase,
+    // Appended rather than inserted: nothing reads the numeric payload value
+    // today, but keeping the original numbers stable avoids a latent journal
+    // compatibility break if that ever changes.
+    RemoteDirectoryMove,
+    LocalDirectoryMove,
 }
 
 public sealed record PlanAction(
@@ -33,7 +36,11 @@ public sealed record PlanAction(
     string PathKey,
     string? SecondaryPath = null,
     string? RemoteUid = null,
-    string? Reason = null)
+    string? Reason = null,
+    // Orders steps of one logical operation (a cross-parent directory move is a
+    // move followed by a same-parent rename). Both steps use the same action
+    // kind but must never reorder inside the same phase/order bucket.
+    int Step = 0)
 {
     /// <summary>Dependency-safe execution phase (SPEC §5.5).</summary>
     public int Phase => Kind switch

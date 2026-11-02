@@ -48,6 +48,16 @@ public sealed class PreparedSync : IDisposable
     public int RunsSinceFull { get; }
 
     public void Dispose() => State.Dispose();
+
+    /// <summary>
+    /// Replaces the (read-only, in-memory) state with a writable store while
+    /// keeping the snapshots and plan captured under the run lock. Rebuild uses
+    /// this after the old DB has been backed up and removed, so the writable
+    /// store starts from the empty baseline the plan was computed against.
+    /// </summary>
+    internal PreparedSync WithState(StateStore state) =>
+        new(Config, Sync, Cli, state, Baseline, Local, Remote, Plan,
+            UsedFastListing, RunsSinceFull);
 }
 
 public sealed record SyncAttempt(
@@ -91,6 +101,20 @@ public static class SyncService
             baselineOverride: Array.Empty<EntryRecord>(), emptyState: true);
     }
 
+    /// <summary>
+    /// Opens a writable state store for an under-lock rebuild whose snapshots
+    /// and plan were already captured by <see cref="PrepareForRebuildPreview"/>.
+    /// The caller must have backed up and removed the old DB first, so the new
+    /// store starts from an empty baseline. No second remote listing occurs.
+    /// </summary>
+    public static PreparedSync PrepareForRebuildExecution(
+        PdsyncConfig config,
+        SyncConfig sync,
+        PreparedSync prepared)
+    {
+        return prepared.WithState(StateStore.Open(config, sync));
+    }
+
     public static SyncAttempt Run(
         PdsyncConfig config,
         SyncConfig sync,
@@ -103,9 +127,27 @@ public static class SyncService
         bool cleanupStaged,
         TextWriter? diagnostics = null)
     {
-        var diagnosticsWriter = diagnostics ?? output;
         using var prepared = Prepare(config, sync, readOnly: false, fastRequested, fullRequested,
             interactive, cleanupStaged);
+        return RunPrepared(prepared, fastRequested, force, verbose, output, cleanupStaged, diagnostics);
+    }
+
+    /// <summary>
+    /// Applies a plan that was prepared elsewhere (rebuild prepares it under the
+    /// run lock). The caller owns <paramref name="prepared"/> and must dispose it.
+    /// </summary>
+    public static SyncAttempt RunPrepared(
+        PreparedSync prepared,
+        bool fastRequested,
+        bool force,
+        bool verbose,
+        TextWriter output,
+        bool cleanupStaged,
+        TextWriter? diagnostics = null)
+    {
+        var config = prepared.Config;
+        var sync = prepared.Sync;
+        var diagnosticsWriter = diagnostics ?? output;
 
         var pending = prepared.State.LoadPending();
         string? warning = null;

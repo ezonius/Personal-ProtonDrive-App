@@ -1582,7 +1582,7 @@ public sealed class CliFakeTests
     }
 
     [Fact]
-    public void Rebuild_LockHeld_ReturnsExit5WithoutWritingOrListing()
+    public void Rebuild_LockHeld_ReturnsExit5WithoutWritingAfterPreview()
     {
         using var fixture = new Fixture();
         fixture.SeedRoot();
@@ -1592,15 +1592,77 @@ public sealed class CliFakeTests
         var listings = fixture.InvocationCount("list");
         var before = File.ReadAllBytes(fixture.DbPath());
         using var held = PdSync.Exec.RunLock.Acquire(fixture.Config, fixture.Config.Syncs.Single());
+        var lockDirectory = Path.Combine(fixture.StateDir, "locks");
+        var lockFilesBefore = fixture.StateTreeEntries();
+        var lockPath = Directory.GetFiles(lockDirectory).Single();
+        var lockLength = new FileInfo(lockPath).Length;
 
         var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
 
         result.ExitCode.Should().Be(5, result.Stdout + result.Stderr);
         result.Stderr.Should().Contain("lock");
-        fixture.InvocationCount("list").Should().Be(listings, "the lock must precede all remote work");
+        fixture.InvocationCount("list").Should().Be(
+            listings + 1, "only the lock-free preview lists before the held lock is detected");
         File.ReadAllBytes(fixture.DbPath()).Should().Equal(before);
         fixture.LegacyStateBackups().Should().BeEmpty();
         fixture.RebuildBackupFiles().Should().BeEmpty();
+        fixture.StateTreeEntries().Should().Equal(lockFilesBefore);
+        Directory.GetFiles(lockDirectory).Should().Equal(new[] { lockPath });
+        new FileInfo(lockPath).Length.Should().Be(lockLength);
+    }
+
+    [Fact]
+    public void Rebuild_VirginState_NonInteractiveRefusal_WritesNoStateTree()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+
+        var result = fixture.CliWithInput(string.Empty, "rebuild", "docs", "--policy", "adopt");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("rebuild requires --yes when not interactive");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        fixture.StateTreeEntries().Should().BeEmpty("a refusal must not create state/ at all");
+        fixture.StateDirEntries().Should().BeEmpty("a refusal must not create state/ or locks/");
+        fixture.InvocationCount("upload").Should().Be(0);
+        fixture.InvocationCount("download").Should().Be(0);
+    }
+
+    [Fact]
+    public void Rebuild_VirginState_TtyRefusal_WritesNoStateTree()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+
+        var result = fixture.CliWithStdin("n\n", isTty: true,
+            "rebuild", "docs", "--policy", "adopt");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("rebuild cancelled");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        fixture.StateTreeEntries().Should().BeEmpty("a refusal must not create state/ at all");
+        fixture.StateDirEntries().Should().BeEmpty("a refusal must not create state/ or locks/");
+    }
+
+    [Fact]
+    public void Rebuild_VirginState_DryRun_WritesNoStateTree()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--dry-run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("rebuild docs (dry-run)");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        fixture.StateTreeEntries().Should().BeEmpty("a dry-run must not create state/ at all");
+        fixture.StateDirEntries().Should().BeEmpty("a dry-run must not create state/ or locks/");
     }
 
     [Fact]
@@ -1907,6 +1969,29 @@ public sealed class CliFakeTests
             var stderr = new StringWriter();
             var exit = CliApp.Run(all, stdout, stderr, detector);
             return new CliResult(exit, stdout.ToString(), stderr.ToString());
+        }
+
+        /// <summary>Every path under the configured stateDir, relative to it.</summary>
+        public IReadOnlyList<string> StateDirEntries()
+        {
+            return Directory.Exists(StateDir)
+                ? Directory.GetFileSystemEntries(StateDir, "*", SearchOption.AllDirectories)
+                    .Select(path => Path.GetRelativePath(StateDir, path))
+                    .OrderBy(path => path, StringComparer.Ordinal)
+                    .ToList()
+                : Array.Empty<string>();
+        }
+
+        /// <summary>Every path under stateDir/state, relative to stateDir.</summary>
+        public IReadOnlyList<string> StateTreeEntries()
+        {
+            var directory = Path.Combine(StateDir, "state");
+            return Directory.Exists(directory)
+                ? Directory.GetFileSystemEntries(directory, "*", SearchOption.AllDirectories)
+                    .Select(path => Path.GetRelativePath(StateDir, path))
+                    .OrderBy(path => path, StringComparer.Ordinal)
+                    .ToList()
+                : Array.Empty<string>();
         }
 
         public string DbPath() => Path.Combine(

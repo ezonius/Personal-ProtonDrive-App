@@ -101,10 +101,8 @@ public static class RebuildCommand
             return 0;
         }
 
-        // Lock precedes all remote work, so a held lock exits 5 without any
-        // listing or other side effect.
-        using var runLock = RunLock.Acquire(config, sync);
-
+        // Preview before taking the lock so a refusal (or a blocking conflict)
+        // writes nothing at all, including state/locks, on a virgin state dir.
         PlanResult preview;
         using (var prepared = SyncService.PrepareForRebuildPreview(config, effectiveSync))
             preview = prepared.Plan;
@@ -146,14 +144,34 @@ public static class RebuildCommand
             }
         }
 
+        // The user approved the preview. Only now take the lock; a held lock
+        // exits 5 before any backup or state replacement.
+        using var runLock = RunLock.Acquire(config, sync);
+
+        // Re-plan under the lock before destroying state: a conflict that
+        // appeared since the preview still exits 2 with no backup.
+        using var verified = SyncService.PrepareForRebuildPreview(config, effectiveSync);
+        if (verified.Plan.HasBlockingConflicts)
+        {
+            WriteBlockingConflicts(promptWriter, verified.Plan);
+            if (json)
+                WriteJson(output, ResultJson(sync, policyName, verified.Plan, Counts.From(verified.Plan),
+                    dryRun: false, backup: null, succeeded: 0, failed: 0, skipped: 0, exitCode: 2));
+            return 2;
+        }
+
         var backup = BackupAndClearState(config, sync);
         if (backup is not null && !json)
             output.WriteLine($"  state backup: {backup}");
 
-        var attempt = SyncService.Run(
-            config, effectiveSync,
-            fastRequested: false, fullRequested: true,
-            force: false, interactive: false, verbose,
+        // The old DB is gone, so this writable store starts empty. The plan and
+        // snapshots were captured under the lock, so no third listing occurs.
+        using var execution = SyncService.PrepareForRebuildExecution(config, effectiveSync, verified);
+        var attempt = SyncService.RunPrepared(
+            execution,
+            fastRequested: false,
+            force: false,
+            verbose,
             json ? TextWriter.Null : output,
             cleanupStaged: false,
             error);

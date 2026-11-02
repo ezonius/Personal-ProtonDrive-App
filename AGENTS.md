@@ -185,8 +185,9 @@ These are the easiest invariants to break. Check `SPEC.md` §2 for the full list
     invalid ranges, overlapping sync roots, and a state/log dir inside a sync
     root are config errors (exit 4).
 
-Exit codes: `0` OK, `1` runtime/partial failure, `2` blocking conflict,
-`3` auth, `4` config, `5` lock held, `6` safety guard.
+Exit codes: `0` OK, `1` runtime/partial failure, `2` unresolved conflict
+(blocking, non-interactive `ask` fallback, or deferred), `3` auth, `4` config,
+`5` lock held, `6` safety guard.
 
 ---
 

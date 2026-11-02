@@ -147,8 +147,10 @@ dist/win-x64/PdSync.exe status  --config C:\pdsync\pdsync.yaml
 
 Notes:
 
-- `run` never prompts. `--yes` is accepted globally but only matters for `init`,
-  `trash purge`, and `rebuild`; it does not change `run`.
+- `plan` never prompts. `run` prompts only for `conflict: ask` on a TTY without
+  `--json`/`--yes` (SPEC §5.2); a scheduled task has no TTY, so scheduled runs
+  keep the keep-both fallback (exit `2`). `--yes` therefore also matters for
+  `run`: it suppresses that prompt.
 - `plan` is strictly read-only: no state DB creation/migration, no lock, no fast
   counter, no log file, no Proton write.
 - The first `run` creates the state DB under `stateDir`. Deleting that DB is
@@ -261,7 +263,7 @@ schtasks /run /tn "pdsync nightly"
 schtasks /query /tn "pdsync nightly" /v /fo LIST | Select-String "Last Result"
 ```
 
-Expected `Last Result`: `0` (or `2` if conflicts are pending, see §5). To debug a
+Expected `Last Result`: `0` (or `2` if conflicts are unresolved, see §5). To debug a
 different exit code, temporarily point the action at a wrapper:
 
 ```bat
@@ -293,9 +295,12 @@ Details that matter to an operator:
 
 - **Exit 2 is not a crash.** `run` applies every non-conflicting action, commits
   that subset, and leaves the conflicting paths listed. `plan` exits `2` too
-  when blocking conflicts exist. Conflicts are resolved by editing/keeping a
-  file and rerunning, or by setting `defaults.conflict` / per-sync `conflict`,
-  or as a last resort by `rebuild --policy=...`.
+  when blocking conflicts exist. Exit `2` covers all unresolved cases: blocking
+  conflicts, the non-interactive `ask` keep-both fallback, and paths deferred
+  with `s` at the prompt. Conflicts are resolved by answering the prompt for
+  `conflict: ask`, by editing/keeping a file and rerunning, by setting
+  `defaults.conflict` / per-sync `conflict`, or as a last resort by
+  `rebuild --policy=...`.
 - **Exit 3** is raised before any state change when the session is missing or
   expired at the start, and can also abort mid-run. A mid-run auth abort does
   not retry, does not commit the failed action, and stops later actions;

@@ -35,13 +35,15 @@ Options: `--config <path>`, `--sync <name>`, `--json`, `--verbose`, `--yes`,
 `--limit <n>` (listing commands) — the global options printed by `--help`
 (`--policy` and the `--` end-of-options marker are listed with their commands).
 The parser also accepts `--no-color` and `--interactive`, neither of which
-appears in the usage banner. `--interactive` only matters for `conflict: ask`:
-it turns the silent keep-both fallback into a blocking conflict (exit 2) unless
-the conflict is resolved at an interactive prompt; `plan` and a non-TTY `run`
-therefore fail with exit 2, and `--json`/`--yes` never prompt.
+appears in the usage banner. `--interactive` only matters for `conflict: ask`
+when no usable prompt exists: it forces the conflict to block (exit 2) instead
+of taking the keep-both fallback. A TTY `run` prompts for `ask` conflicts even
+without the flag; `plan` never prompts, and `--json`/`--yes` never prompt.
 
-Exit codes: `0` success, `1` runtime/CLI failure, `2` blocking conflicts,
-`3` auth, `4` config, `5` lock held, `6` safety guard.
+Exit codes: `0` success, `1` runtime/CLI failure, `2` unresolved conflicts
+(blocking conflicts, the non-interactive `ask` keep-both fallback, or paths
+deferred to the next run; the safe subset is still applied), `3` auth,
+`4` config, `5` lock held, `6` safety guard.
 
 ## Quick start
 

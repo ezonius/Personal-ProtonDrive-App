@@ -30,7 +30,8 @@ public static class CliApp
         TextWriter error,
         IDesktopMappingDetector? desktopMappings = null,
         TextReader? input = null,
-        Func<string?>? configDiscovery = null)
+        Func<string?>? configDiscovery = null,
+        bool? stdinIsTty = null)
     {
         CliArguments parsed;
         try
@@ -49,12 +50,18 @@ public static class CliApp
             return parsed.ShowHelp ? 0 : 1;
         }
 
-        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init" or "trash" or "history"))
+        if (parsed.Command is not ("plan" or "run" or "doctor" or "status" or "ignore" or "init" or "trash" or "history" or "rebuild"))
             return Unknown(parsed.Command, error);
 
         if (parsed.CleanupStaged && parsed.Command is not "run")
         {
             error.WriteLine("pdsync: --cleanup-staged is only valid with run");
+            return 1;
+        }
+
+        if (parsed.Policy is not null && parsed.Command != "rebuild")
+        {
+            error.WriteLine("pdsync: --policy is only valid with rebuild");
             return 1;
         }
 
@@ -106,6 +113,7 @@ public static class CliApp
                 "history" => HistoryCommand.Execute(config, SelectSyncs(config, parsed.SyncNames), parsed.Limit, parsed.Json, output),
                 "ignore" => Ignore(config, parsed, output, error),
                 "trash" => Trash(config, parsed, input ?? Console.In, output, error),
+                "rebuild" => Rebuild(config, parsed, input ?? Console.In, stdinIsTty, output, error),
                 _ => Unknown(parsed.Command, error),
             };
         }
@@ -702,6 +710,19 @@ public static class CliApp
         (rawPath[^1] == '/' || rawPath[^1] == '\\') &&
         !PathUtil.IsDriveOrFilesystemRoot(rawPath);
 
+    private static int Rebuild(
+        PdsyncConfig config,
+        CliArguments args,
+        TextReader input,
+        bool? stdinIsTty,
+        TextWriter output,
+        TextWriter error) =>
+        RebuildCommand.Execute(
+            config, args.SyncNames, args.Policy,
+            args.Fast, args.Full, args.Force, args.CleanupStaged, args.Interactive,
+            args.OlderThanDays, args.Yes, args.DryRun, args.Verbose, args.Json,
+            input, stdinIsTty, output, error);
+
     private static int Trash(
         PdsyncConfig config,
         CliArguments args,
@@ -872,10 +893,13 @@ public static class CliApp
               trash list          list local trash runs; never writes
               trash purge --older-than <days> [--dry-run] [--yes]
                                   delete whole trash run directories (manual only)
+              rebuild <sync> --policy=<p> [--yes] [--dry-run]
+                                  rebuild state from local+remote (last resort)
 
             Options:
               --config <path>     explicit config file
               --sync <name>       select a sync by name (repeatable)
+              --policy <p>        rebuild only: adopt|keep-both|local-wins|remote-wins
               --                  end of options (e.g. ignore -- -draft.txt)
               --fast              incremental remote listing
               --full              force a complete remote listing
@@ -902,6 +926,7 @@ public static class CliApp
         public bool Yes { get; private set; }
         public bool ShowHelp { get; private set; }
         public bool DryRun { get; private set; }
+        public string? Policy { get; private set; }
         public int? OlderThanDays { get; private set; }
         public int Limit { get; private set; } = 20;
         public bool UnexpectedPositional { get; private set; }
@@ -961,6 +986,9 @@ public static class CliApp
                     case "--older-than":
                         result.OlderThanDays = ParseDays(Next(args, ref i, "--older-than"));
                         break;
+                    case "--policy":
+                        result.Policy = Next(args, ref i, "--policy");
+                        break;
                     case "--limit":
                         result.Limit = ParseLimit(Next(args, ref i, "--limit"));
                         break;
@@ -980,6 +1008,8 @@ public static class CliApp
                             result.SyncNames.Add(arg["--sync=".Length..]);
                         else if (arg.StartsWith("--older-than=", StringComparison.Ordinal))
                             result.OlderThanDays = ParseDays(arg["--older-than=".Length..]);
+                        else if (arg.StartsWith("--policy=", StringComparison.Ordinal))
+                            result.Policy = arg["--policy=".Length..];
                         else if (arg.StartsWith("--limit=", StringComparison.Ordinal))
                             result.Limit = ParseLimit(arg["--limit=".Length..]);
                         else if (arg.StartsWith('-'))

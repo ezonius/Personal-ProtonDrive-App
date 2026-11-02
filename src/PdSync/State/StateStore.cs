@@ -136,7 +136,19 @@ public sealed class StateStore : IDisposable
     public static StateStore OpenReadOnly(PdsyncConfig config, SyncConfig sync) =>
         OpenCore(config, sync, readOnly: true);
 
-    private static StateStore OpenCore(PdsyncConfig config, SyncConfig sync, bool readOnly)
+    /// <summary>
+    /// Opens an in-memory empty baseline without touching the on-disk database.
+    /// Used by <c>rebuild --dry-run</c>: the preview must ignore the old entries
+    /// and must still work when the existing file is corrupt.
+    /// </summary>
+    public static StateStore OpenEmpty(PdsyncConfig config, SyncConfig sync) =>
+        OpenCore(config, sync, readOnly: true, forceInMemory: true);
+
+    private static StateStore OpenCore(
+        PdsyncConfig config,
+        SyncConfig sync,
+        bool readOnly,
+        bool forceInMemory = false)
     {
         var syncId = ComputeSyncId(sync.LocalRoot, sync.RemoteRoot);
         var stateDirectory = Path.Combine(config.StateDir, "state");
@@ -147,7 +159,7 @@ public sealed class StateStore : IDisposable
         SqliteOpenMode mode;
         var inMemory = false;
 
-        if (readOnly && !existed)
+        if (forceInMemory || (readOnly && !existed))
         {
             dataSource = ":memory:";
             mode = SqliteOpenMode.ReadWriteCreate;
@@ -180,7 +192,7 @@ public sealed class StateStore : IDisposable
         {
             Configure(connection, readOnly);
 
-            if (readOnly && existed)
+            if (readOnly && existed && !inMemory)
             {
                 var version = ReadUserVersion(connection);
                 if (version > SchemaVersion)
@@ -197,7 +209,9 @@ public sealed class StateStore : IDisposable
             }
             else
             {
-                Migrate(connection, databasePath, existed);
+                // An in-memory preview must never take the writable migration /
+                // backup path just because a file happens to exist on disk.
+                Migrate(connection, databasePath, existed && !inMemory);
             }
 
             var store = new StateStore(

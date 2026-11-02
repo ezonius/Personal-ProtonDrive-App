@@ -1467,6 +1467,334 @@ public sealed class CliFakeTests
         result.Stderr.Should().Contain("proton.minVersion").And.Contain("not-a-version");
     }
 
+    [Fact]
+    public void Rebuild_AdoptIdenticalContent_RecordsBaselineWithoutTransfer()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("1 recorded");
+        fixture.InvocationCount("upload").Should().Be(0);
+        fixture.InvocationCount("download").Should().Be(0);
+        fixture.Entries().Should().ContainSingle().Which.Path.Should().Be("a.txt");
+        File.Exists(fixture.DbPath()).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Rebuild_KeepBoth_ConflictRenamesAndKeepsBothSides()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "remote");
+        fixture.WriteLocal("a.txt", "local");
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "keep-both", "--yes");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().HaveCount(2);
+        fixture.RemoteFileNames().Should().HaveCount(2);
+        fixture.Entries().Should().HaveCount(2);
+        fixture.InvocationCount("upload").Should().BeGreaterThan(0);
+        fixture.InvocationCount("download").Should().BeGreaterThan(0);
+    }
+
+    [Fact]
+    public void Rebuild_LocalWins_UploadsRevisionAndPreservesRemoteHistory()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "remote");
+        fixture.WriteLocal("a.txt", "local");
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "local-wins", "--yes");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("local");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("local");
+        fixture.IsTrashed("/my-files/root/a.txt").Should().BeFalse();
+        fixture.InvocationCount("upload").Should().Be(1);
+        fixture.InvocationCount("trash").Should().Be(0);
+        fixture.Entries().Should().ContainSingle().Which.Path.Should().Be("a.txt");
+    }
+
+    [Fact]
+    public void Rebuild_RemoteWins_DownloadsAndMovesLocalLoserToTrash()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "remote");
+        fixture.WriteLocal("a.txt", "local");
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "remote-wins", "--yes");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote");
+        Directory.GetFiles(Path.Combine(fixture.StateDir, "trash"), "a.txt", SearchOption.AllDirectories)
+            .Should().ContainSingle();
+        fixture.InvocationCount("download").Should().Be(1);
+        fixture.InvocationCount("upload").Should().Be(0);
+        fixture.Entries().Should().ContainSingle().Which.Path.Should().Be("a.txt");
+    }
+
+    [Fact]
+    public void Rebuild_MissingState_CreatesFreshBaseline()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "remote");
+
+        File.Exists(fixture.DbPath()).Should().BeFalse();
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        File.Exists(fixture.DbPath()).Should().BeTrue();
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote");
+        fixture.Entries().Should().ContainSingle().Which.Path.Should().Be("a.txt");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state", "backups")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void Rebuild_CorruptState_BacksUpRawBytesThenRebuilds()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+        var corrupt = Encoding.UTF8.GetBytes("this is not a sqlite database");
+        Directory.CreateDirectory(Path.GetDirectoryName(fixture.DbPath())!);
+        File.WriteAllBytes(fixture.DbPath(), corrupt);
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        var backup = Directory.GetFiles(
+            Path.Combine(fixture.StateDir, "state", "backups"), "*.pre-rebuild-*.sqlite")
+            .Should().ContainSingle().Subject;
+        File.ReadAllBytes(backup).Should().Equal(corrupt);
+        fixture.Entries().Should().ContainSingle().Which.Path.Should().Be("a.txt");
+    }
+
+    [Fact]
+    public void Rebuild_LockHeld_ReturnsExit5WithoutWritingOrListing()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        var listings = fixture.InvocationCount("list");
+        var before = File.ReadAllBytes(fixture.DbPath());
+        using var held = PdSync.Exec.RunLock.Acquire(fixture.Config, fixture.Config.Syncs.Single());
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
+
+        result.ExitCode.Should().Be(5, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("lock");
+        fixture.InvocationCount("list").Should().Be(listings, "the lock must precede all remote work");
+        File.ReadAllBytes(fixture.DbPath()).Should().Equal(before);
+        fixture.LegacyStateBackups().Should().BeEmpty();
+        fixture.RebuildBackupFiles().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Rebuild_WithoutYesNonInteractive_RefusesWithoutWriting()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        var before = File.ReadAllBytes(fixture.DbPath());
+
+        var result = fixture.CliWithInput(string.Empty,
+            "rebuild", "docs", "--policy", "keep-both");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("rebuild requires --yes when not interactive");
+        File.ReadAllBytes(fixture.DbPath()).Should().Equal(before);
+        fixture.LegacyStateBackups().Should().BeEmpty();
+        fixture.RebuildBackupFiles().Should().BeEmpty();
+        fixture.InvocationCount("upload").Should().Be(0);
+        fixture.InvocationCount("download").Should().Be(0);
+    }
+
+    [Fact]
+    public void Rebuild_TtyRefusal_CancelsWithoutWriting()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        var before = File.ReadAllBytes(fixture.DbPath());
+
+        var result = fixture.CliWithStdin("n\n", isTty: true,
+            "rebuild", "docs", "--policy", "keep-both");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("rebuild cancelled");
+        File.ReadAllBytes(fixture.DbPath()).Should().Equal(before);
+        fixture.LegacyStateBackups().Should().BeEmpty();
+        fixture.RebuildBackupFiles().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Rebuild_DryRun_PrintsSummaryWithoutWritingStateOrBackup()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        fixture.WriteLocal("a.txt", "local change");
+        var before = File.ReadAllBytes(fixture.DbPath());
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--dry-run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("rebuild docs (dry-run)");
+        File.ReadAllBytes(fixture.DbPath()).Should().Equal(before);
+        fixture.LegacyStateBackups().Should().BeEmpty();
+        fixture.RebuildBackupFiles().Should().BeEmpty();
+    }
+
+    [Theory]
+    [InlineData("bogus")]
+    [InlineData(null)]
+    public void Rebuild_UnknownOrMissingPolicy_ReturnsUsageErrorWithValueList(string? policy)
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        var args = policy is null
+            ? new[] { "rebuild", "docs", "--yes" }
+            : new[] { "rebuild", "docs", "--policy", policy, "--yes" };
+
+        var result = fixture.Cli(args);
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("adopt|keep-both|local-wins|remote-wins");
+        File.Exists(fixture.DbPath()).Should().BeFalse();
+    }
+
+    [Fact]
+    public void Rebuild_EmptyBaseline_DoesNotDeleteFromOldBaseline()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "alpha");
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        File.Delete(fixture.LocalFull("a.txt"));
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        // With an empty baseline the remote-only file is downloaded. If the old
+        // baseline leaked in, the local deletion would remote-trash it instead.
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("alpha");
+        fixture.IsTrashed("/my-files/root/a.txt").Should().BeFalse();
+        fixture.Entries().Should().ContainSingle().Which.Path.Should().Be("a.txt");
+    }
+
+    [Fact]
+    public void Rebuild_MultipleSyncs_ReturnsUsageError()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+
+        var result = fixture.Cli(
+            "rebuild", "docs", "other", "--policy", "adopt", "--yes");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("exactly one sync");
+        fixture.LegacyStateBackups().Should().BeEmpty();
+        fixture.RebuildBackupFiles().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Rebuild_IgnoreRules_ExcludeIgnoredPathsFromBaseline()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal(".pdignore", "ignored.txt\n");
+        fixture.WriteLocal("ignored.txt", "secret");
+        fixture.WriteLocal("keep.txt", "keep");
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        fixture.Entries().Select(entry => entry.Path).Should().NotContain("ignored.txt");
+        fixture.RemoteFileNames().Should().NotContain("/my-files/root/ignored.txt");
+        fixture.RemoteFile("/my-files/root/keep.txt").Should().Be("keep");
+    }
+
+    [Fact]
+    public void Rebuild_KindMismatch_ReturnsExit2WithoutReplacingState()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "remote");
+        fixture.WriteLocal("a.txt", "same");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        File.Delete(fixture.LocalFull("a.txt"));
+        Directory.CreateDirectory(fixture.LocalFull("a.txt"));
+        var before = File.ReadAllBytes(fixture.DbPath());
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("kind changed");
+        File.ReadAllBytes(fixture.DbPath()).Should().Equal(before);
+        fixture.LegacyStateBackups().Should().BeEmpty();
+        fixture.RebuildBackupFiles().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void Rebuild_Json_HasStableCamelCaseShape()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--dry-run", "--json");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var root = document.RootElement;
+        root.GetProperty("command").GetString().Should().Be("rebuild");
+        root.GetProperty("sync").GetString().Should().Be("docs");
+        root.GetProperty("policy").GetString().Should().Be("adopt");
+        root.GetProperty("dryRun").GetBoolean().Should().BeTrue();
+        root.GetProperty("recorded").GetInt32().Should().Be(1);
+        root.GetProperty("uploaded").GetInt32().Should().Be(0);
+        root.GetProperty("downloaded").GetInt32().Should().Be(0);
+        root.GetProperty("conflictRenamed").GetInt32().Should().Be(0);
+        root.GetProperty("backup").ValueKind.Should().Be(JsonValueKind.Null);
+        root.GetProperty("exitCode").GetInt32().Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("run")]
+    public void NonRebuildCommand_RejectsPolicyFlag(string command)
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+
+        var result = fixture.Cli(command, "--policy", "adopt");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("--policy is only valid with rebuild");
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly TempDirectory _temp = new();
@@ -1558,6 +1886,20 @@ public sealed class CliFakeTests
         public CliResult Cli(params string[] args) =>
             CliWithMappings(StubDesktopMappings.None, args);
 
+        public CliResult CliWithInput(string input, params string[] args) =>
+            CliWithStdin(input, isTty: false, args);
+
+        public CliResult CliWithStdin(string input, bool isTty, params string[] args)
+        {
+            var all = new[] { args[0], "--config", ConfigPath }.Concat(args.Skip(1)).ToArray();
+            var stdout = new StringWriter();
+            var stderr = new StringWriter();
+            var exit = CliApp.Run(
+                all, stdout, stderr, StubDesktopMappings.None,
+                input: new StringReader(input), stdinIsTty: isTty);
+            return new CliResult(exit, stdout.ToString(), stderr.ToString());
+        }
+
         public CliResult CliWithMappings(IDesktopMappingDetector detector, params string[] args)
         {
             var all = new[] { args[0], "--config", ConfigPath }.Concat(args.Skip(1)).ToArray();
@@ -1565,6 +1907,35 @@ public sealed class CliFakeTests
             var stderr = new StringWriter();
             var exit = CliApp.Run(all, stdout, stderr, detector);
             return new CliResult(exit, stdout.ToString(), stderr.ToString());
+        }
+
+        public string DbPath() => Path.Combine(
+            StateDir, "state",
+            PdSync.State.StateStore.ComputeSyncId(
+                Config.Syncs.Single().LocalRoot, Config.Syncs.Single().RemoteRoot) + ".sqlite");
+
+        public IReadOnlyList<PdSync.State.EntryRecord> Entries()
+        {
+            using var state = PdSync.State.StateStore.OpenReadOnly(Config, Config.Syncs.Single());
+            return state.LoadEntries(includeFrozen: true);
+        }
+
+        /// <summary>The migration-style backup emitted directly under state/.</summary>
+        public IReadOnlyList<string> LegacyStateBackups()
+        {
+            var directory = Path.Combine(StateDir, "state");
+            return Directory.Exists(directory)
+                ? Directory.GetFiles(directory, "backup-*.sqlite")
+                : Array.Empty<string>();
+        }
+
+        /// <summary>The explicit rebuild backups under state/backups/.</summary>
+        public IReadOnlyList<string> RebuildBackupFiles()
+        {
+            var directory = Path.Combine(StateDir, "state", "backups");
+            return Directory.Exists(directory)
+                ? Directory.GetFiles(directory, "*", SearchOption.AllDirectories)
+                : Array.Empty<string>();
         }
 
         public string Fake(params string[] args)

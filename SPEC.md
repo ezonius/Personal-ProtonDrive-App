@@ -73,7 +73,8 @@ pdsync ignore <path>             # explain which pattern matched (debug)
 pdsync trash list [--sync <name>] [--json]   # local trash inventory; never writes
 pdsync trash purge --older-than <days> [--dry-run] [--yes] [--sync <name>] [--json]
 pdsync history [sync...] [--limit N] [--json]  # recent runs and action totals; never writes
-pdsync rebuild <sync> --policy=… # rebuild state from local+remote (last resort)
+pdsync rebuild <sync> --policy=adopt|keep-both|local-wins|remote-wins
+                                  # rebuild state from local+remote (last resort)
 ```
 
 Global flags: `--config <path>`, `--verbose`, `--json`, `--no-color`, `--yes`.
@@ -83,6 +84,31 @@ scan, overriding `--fast`), `--force` (override the deletion budget), and
 leftovers, §6.2). `plan` accepts the same scan flags so its output matches the
 run it predicts; it rejects `--cleanup-staged` (exit 1) so a normal `plan` is
 never a preview of the opt-in cleanup divergence.
+
+`rebuild` requires exactly one sync (positional or `--sync`) and an explicit
+`--policy=adopt|keep-both|local-wins|remote-wins`; a missing or unknown policy
+is a usage error (exit 1), and `--policy` is rejected on every other command.
+The policy overrides `initialSync` for this operation only and is applied
+through the normal planner initial-adoption path. Rebuild takes the per-sync run
+lock **before** any remote listing (held → exit 5, no remote call), builds the
+preview, and exits 2 with the blocking-conflict list before any backup or state
+replacement when the plan cannot execute. Otherwise it backs up the existing raw
+DB file to
+`<stateDir>/state/backups/<syncId>.pre-rebuild-<UTC yyyyMMdd-HHmmss>.sqlite`
+when one exists (the backups directory is created only for an actual backup),
+then removes the DB so the run starts from an empty baseline. A missing DB
+needs no backup. A corrupt/unreadable DB is backed up byte-for-byte and then
+replaced, which is the recovery path for this command. The planned summary is
+printed before any state change: without `--yes`, a non-interactive invocation
+exits 1 with `rebuild requires --yes when not interactive`, and a TTY prompt
+(`Rebuild state for <sync> with policy <p>? [y/N]`) treats anything but `y`/`yes`
+as refusal (exit 1, no state change). Preview/refusal/lock-held paths write
+nothing under `state/`, including no migration-style `state/backup-*.sqlite`.
+`--dry-run` prints the same summary from an in-memory empty baseline (it never
+opens the old DB or triggers migration/backup), takes no lock, writes no
+backup/state, and makes no Proton call beyond read-only listing. Success exits 0
+and reports recorded/uploaded/downloaded/conflict-renamed counts; blocking
+conflicts exit 2 and runtime or partial failures exit 1.
 
 `plan`, `run`, and `doctor` check the detected `proton-drive --version`
 against `proton.minVersion` before doing work. An older CLI fails with a clear
@@ -522,9 +548,15 @@ Used on first run and after state loss. Configurable per sync
   transfer nothing. If the digest is missing, require equal size and mtimes
   within tolerance. Otherwise fall through to `keep-both`.
 - `keep-both`: conflict-rename as above.
-- `local-wins` / `remote-wins`: one direction overwrites, loser goes to trash.
+- `local-wins`: upload the local file as the new revision of the remote file;
+  the previous remote content remains in Proton revision history (SPEC §5.2),
+  not in Proton Trash.
+- `remote-wins`: download the remote file; the replaced local file is moved to
+  local trash first.
 
-`pdsync rebuild --policy=...` exposes the same choice explicitly after state loss.
+`pdsync rebuild --policy=...` exposes the same choice explicitly after state loss;
+it reuses these planner and executor paths rather than defining a second
+adoption engine.
 
 ### 5.4 Renames
 
@@ -886,6 +918,8 @@ Rules:
   conflicts still commit the successful subset.
 - `pdsync status` surfaces uncommitted `pending` rows from a crashed run.
 - Backups: on schema migration, copy the DB to `state/backup-<date>.sqlite`.
+- `rebuild` copies the raw DB (even a corrupt one) to
+  `state/backups/<syncId>.pre-rebuild-<date>.sqlite` before removing it.
 - Deleting the state DB is safe but triggers `initialSync` adoption for every
   path; `doctor` warns loudly if the DB is missing while both sides are non-empty.
 

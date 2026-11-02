@@ -45,10 +45,11 @@ pwsh -NoProfile -File tools/live-smoke.ps1
 ```
 
 `--fast`, `--full`, `--force`, `--cleanup-staged` (run only), `--json`,
-`--verbose`, `--interactive`, `--yes`, `--no-color`, `--config`, `--sync`, and
-`--limit` (listing commands) are recognized. `init`, `plan`, `run`, `doctor`,
-`status`, `history`, `ignore`, and `trash` are implemented; `rebuild` is not.
-`ignore` reports the deciding rule for a path and is read-only.
+`--verbose`, `--interactive`, `--yes`, `--no-color`, `--config`, `--sync`,
+`--dry-run`, `--policy` (rebuild only), and `--limit` (listing commands) are
+recognized. `init`, `plan`, `run`, `doctor`, `status`, `history`, `ignore`,
+`trash`, and `rebuild` are implemented. `ignore` reports the deciding rule for
+a path and is read-only.
 
 ### Agent role skills
 
@@ -85,6 +86,8 @@ src/PdSync/
   Cli/CliApp.cs              argument parsing, command handlers, human/JSON output
   Cli/InitCommand.cs         `init`: prompts, generated config/.pdignore, no-overwrite
   Cli/TrashCommand.cs        `trash list|purge`: local retention, read-only list
+  Cli/HistoryCommand.cs      `history`: recent runs/action totals; read-only
+  Cli/RebuildCommand.cs      `rebuild`: explicit-policy baseline recovery, backup/lock/confirm
   Diagnostics/
     DesktopMappingDetector.cs  read-only Proton Drive desktop-app Mappings.json probe
   Config/
@@ -339,7 +342,7 @@ Known gaps / likely next work:
 - `logDir` JSONL run/action/verification logging is implemented and remains
   available for per-action detail; `history` reads `runs.stats_json` instead of
   parsing these logs.
-- `rebuild` is not implemented.
+- `rebuild` is implemented with explicit `--policy`.
 - Interactive conflict prompting is not implemented; `ask` currently uses the
   non-interactive fallback.
 - S15 restore-by-UID is not wired (restore is not used by the sync engine yet).

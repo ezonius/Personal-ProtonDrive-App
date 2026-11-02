@@ -225,6 +225,13 @@ public sealed class Executor
             JsonSerializer.Serialize(action));
         try
         {
+            // A remote trash is a remote side effect: journal the undo record in
+            // its own committed statement before the CLI call, exactly like the
+            // pending row. A crash after `fs trash` but before the entry delete
+            // then still leaves a restorable record.
+            if (action.Kind == PlanActionKind.RemoteTrash)
+                RecordRemoteTrashBeforeCall(action);
+
             VerificationSummary? verification = null;
             _state.InTransaction(() =>
             {
@@ -502,8 +509,23 @@ public sealed class Executor
         _state.DeleteEntry(action.PathKey);
     }
 
+    private void RecordRemoteTrashBeforeCall(PlanAction action)
+    {
+        // Resolve the UID before the CLI call so a node can never be trashed
+        // without an undo record. The row is kept even if the trash call fails;
+        // `trash restore` then refuses with exit 2 and never guesses.
+        var uid = action.RemoteUid
+            ?? _remote.Get(action.PathKey)?.Uid
+            ?? _baseByKey.GetValueOrDefault(action.PathKey)?.RemoteUid;
+        if (string.IsNullOrEmpty(uid))
+            throw new SyncException($"cannot record remote trash for {action.Path}: remote uid is unknown");
+
+        _state.RecordRemoteTrash(action.Path, action.PathKey, uid, _runId);
+    }
+
     private void TrashRemote(PlanAction action)
     {
+        // The undo record was already committed by ExecuteOne before this call.
         _cli.Trash(RemoteFull(action.Path));
         _state.DeleteEntry(action.PathKey);
     }
@@ -542,6 +564,8 @@ public sealed class Executor
             throw new SyncException("adoption source disappeared");
 
         _state.UpsertEntry(EntryFromLocalRemote(adoption.Path, local, remote));
+        // The path is active again; a stale undo record must not outlive it.
+        _state.DeleteRemoteTrash(adoption.PathKey);
     }
 
     private void ApplyState(PlanAction action)
@@ -550,6 +574,12 @@ public sealed class Executor
         {
             case PlanActionKind.DropBase:
                 _state.DeleteEntry(action.PathKey);
+                break;
+            // The path is active again; a stale undo record must not outlive it.
+            case PlanActionKind.UploadCreate:
+            case PlanActionKind.KeepBothUpload:
+            case PlanActionKind.DownloadCreate:
+                _state.DeleteRemoteTrash(action.PathKey);
                 break;
             // Other actions already wrote their state in their execute method.
             default:

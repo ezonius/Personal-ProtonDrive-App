@@ -480,9 +480,9 @@ public sealed class Commands
         var count = 0;
         foreach (var path in parsed.Paths)
         {
-            var node = _drive.ResolveTrash(path);
+            var node = _drive.ResolveTrashForRestore(path);
             if (node is null)
-                return Error($"Node not found or ambiguous: {path}");
+                return Error($"Node not found: {path}");
 
             var parentUid = node.OriginalParentUid ?? node.ParentUid;
             var parent = _drive.FindByUid(parentUid);

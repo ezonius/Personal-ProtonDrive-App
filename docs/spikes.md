@@ -74,9 +74,31 @@ whole batch with `No paths matched` and uploads nothing.
 ### 4. Trash is account-global and ambiguous by name
 
 `fs list --json /trash` returned duplicate `trash-b.txt` entries from different
-runs. Restore must address the trashed node by **UID** (`/trash/<uid>`) when
-names collide; name-based `/trash/name` is only safe when unique. This is S15,
-to verify in M1.
+runs. This is S15; the answer below was probed on the real account on
+2026-11-02 with `proton-drive.exe` 0.9.0.
+
+### 4.1 S15 answer: restore is name-only, and duplicate names are arbitrary
+
+With two trashed files both named `x.txt`:
+
+- `fs restore /trash/x.txt` **works** and restores an arbitrary one (no
+  ambiguity error).
+- `fs restore /trash/<full-node-uid>` -> `Trashed node not found`, even when
+  that uid exists exactly once in `fs list --json /trash`.
+- `fs restore /my-files/<root>/c/y.txt` -> `Path "..." is not supported`.
+- `fs restore /trash/<uid>/y.txt` -> `Browsing trashed folders is not supported`.
+
+**Conclusion:** UID-addressed restore is **not available** in this CLI version.
+`fs restore` is name-only, and a duplicated name restores an arbitrary node
+without warning. pdsync therefore refuses to guess: `pdsync trash restore`
+restores only when the recorded name matches exactly one trashed node **and**
+that node's uid matches the uid persisted by the executor. Ambiguity or a uid
+mismatch exits 2 and points the operator at the Proton web app. The fake CLI
+mirrors the name-only resolution (including first-match-on-duplicate), while
+the pdsync tests drive the ambiguity path off `fs list /trash`.
+
+Evidence is from the coordinator's live probe; the pdsync behavior itself is
+covered by fake-CLI tests (no live restore in the automated suite).
 
 ### 5. Per-call cost dominates
 
@@ -146,7 +168,7 @@ dotnet test tests/PdSync.Tests/PdSync.Tests.csproj --no-build --nologo `
 | Item | Why | Plan |
 |---|---|---|
 | S8 live auth expiry | Would break the authenticated session for the suite | pdsync's exit-3/abort/no-retry/no-commit contract is covered by fake-CLI tests (§7); only the real CLI's silent-refresh behavior remains unprobed |
-| S15 restore by UID | Not yet probed | M1, using a collision with two same-named trash entries |
+| S15 restore by UID | Answered 2026-11-02: the CLI has no UID-addressed restore and duplicate names are arbitrary | Implemented the name-unique + recorded-uid fallback (§4.1); live smoke still does not exercise a conflict rename or restore |
 | 429 / rate limits | Would require hammering the API | Retry with backoff implemented for all calls on 429 (request did not execute); idempotent calls also retry timeout/5xx/network resets. Measure tuning in a long live run. |
 | Large files / resume | Time and quota | M2, with a ≥1 GB file |
 | Long paths (>260) | Not exercised | M5, Windows-specific test |

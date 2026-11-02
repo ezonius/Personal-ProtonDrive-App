@@ -35,6 +35,18 @@ public sealed record EntryRecord(
     bool Frozen,
     DateTimeOffset? LastSyncedAt);
 
+/// <summary>
+/// One remote node that pdsync moved to Proton Trash. The UID is the only
+/// unambiguous identity the CLI exposes, so it is recorded with the folded path
+/// key at the moment the trash action commits.
+/// </summary>
+public sealed record RemoteTrashRecord(
+    string PathKey,
+    string Path,
+    string RemoteUid,
+    DateTimeOffset TrashedAt,
+    long RunId);
+
 public sealed record PendingRecord(
     long Id,
     string Op,
@@ -212,6 +224,9 @@ public sealed class StateStore : IDisposable
                 // An in-memory preview must never take the writable migration /
                 // backup path just because a file happens to exist on disk.
                 Migrate(connection, databasePath, existed && !inMemory);
+                // remote_trash is additive and created lazily so an existing v1
+                // DB keeps working, including in read-only plan/doctor paths.
+                EnsureRemoteTrashTable(connection);
             }
 
             var store = new StateStore(
@@ -353,6 +368,81 @@ public sealed class StateStore : IDisposable
             SET frozen = 1, local_present = 0, remote_present = 0
             WHERE sync_id = $sync AND path_key = $key;
             """;
+        command.Parameters.AddWithValue("$sync", SyncId);
+        command.Parameters.AddWithValue("$key", pathKey);
+        command.ExecuteNonQuery();
+    }
+
+    // ------------------------------------------------------------ remote trash
+
+    /// <summary>
+    /// Records the node the executor is about to move to Proton Trash. The row
+    /// is committed before the CLI call because the remote side effect cannot be
+    /// rolled back with a local transaction.
+    /// </summary>
+    public void RecordRemoteTrash(
+        string path,
+        string pathKey,
+        string remoteUid,
+        long runId,
+        DateTimeOffset? trashedAt = null)
+    {
+        ThrowIfDisposed();
+        using var command = CreateCommand();
+        command.CommandText = """
+            INSERT INTO remote_trash (sync_id, path_key, path, remote_uid, trashed_at, run_id)
+            VALUES ($sync, $key, $path, $uid, $trashed, $run)
+            ON CONFLICT(sync_id, path_key) DO UPDATE SET
+                path = excluded.path,
+                remote_uid = excluded.remote_uid,
+                trashed_at = excluded.trashed_at,
+                run_id = excluded.run_id;
+            """;
+        command.Parameters.AddWithValue("$sync", SyncId);
+        command.Parameters.AddWithValue("$key", pathKey);
+        command.Parameters.AddWithValue("$path", path);
+        command.Parameters.AddWithValue("$uid", remoteUid);
+        command.Parameters.AddWithValue("$trashed", FormatTimestamp(trashedAt ?? DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$run", runId);
+        command.ExecuteNonQuery();
+    }
+
+    public RemoteTrashRecord? GetRemoteTrash(string pathKey)
+    {
+        ThrowIfDisposed();
+        // A v1 database created before this feature has no table; a read-only
+        // open must treat that as "no records" instead of failing.
+        if (!RemoteTrashTableExists())
+            return null;
+
+        using var command = CreateCommand();
+        command.CommandText = """
+            SELECT path_key, path, remote_uid, trashed_at, run_id
+            FROM remote_trash
+            WHERE sync_id = $sync AND path_key = $key;
+            """;
+        command.Parameters.AddWithValue("$sync", SyncId);
+        command.Parameters.AddWithValue("$key", pathKey);
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+        return new RemoteTrashRecord(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            ParseTimestamp(reader.GetString(3)),
+            reader.GetInt64(4));
+    }
+
+    public void DeleteRemoteTrash(string pathKey)
+    {
+        ThrowIfDisposed();
+        if (!RemoteTrashTableExists())
+            return;
+
+        using var command = CreateCommand();
+        command.CommandText = "DELETE FROM remote_trash WHERE sync_id = $sync AND path_key = $key;";
         command.Parameters.AddWithValue("$sync", SyncId);
         command.Parameters.AddWithValue("$key", pathKey);
         command.ExecuteNonQuery();
@@ -571,7 +661,7 @@ public sealed class StateStore : IDisposable
         {
             using var transaction = connection.BeginTransaction();
             CreateSchemaV1(connection, transaction);
-            SetUserVersion(connection, 1, transaction);
+            SetUserVersion(connection, SchemaVersion, transaction);
             transaction.Commit();
             return;
         }
@@ -642,6 +732,39 @@ public sealed class StateStore : IDisposable
             CREATE INDEX ix_runs_sync_started ON runs(sync_id, started_at);
             """;
         command.ExecuteNonQuery();
+    }
+
+    /// <summary>
+    /// Creates the additive <c>remote_trash</c> table without bumping
+    /// <c>user_version</c>: older v1 databases stay valid and read-only opens
+    /// keep working.
+    /// </summary>
+    private static void EnsureRemoteTrashTable(SqliteConnection connection)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE IF NOT EXISTS remote_trash (
+                sync_id TEXT NOT NULL,
+                path_key TEXT NOT NULL,
+                path TEXT NOT NULL,
+                remote_uid TEXT NOT NULL,
+                trashed_at TEXT NOT NULL,
+                run_id INTEGER NOT NULL,
+                PRIMARY KEY (sync_id, path_key),
+                FOREIGN KEY (sync_id) REFERENCES syncs(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS ix_remote_trash_sync ON remote_trash(sync_id);
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private bool RemoteTrashTableExists()
+    {
+        using var command = CreateCommand();
+        command.CommandText =
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'remote_trash';";
+        return Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
     }
 
     private static int ReadUserVersion(SqliteConnection connection)

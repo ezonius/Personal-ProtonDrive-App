@@ -38,6 +38,7 @@ src/PdSync/bin/Debug/net8.0/PdSync.exe run  --config .\pdsync.yaml
 src/PdSync/bin/Debug/net8.0/PdSync.exe doctor --config .\pdsync.yaml
 src/PdSync/bin/Debug/net8.0/PdSync.exe status --config .\pdsync.yaml
 src/PdSync/bin/Debug/net8.0/PdSync.exe ignore path/to/file --config .\pdsync.yaml
+src/PdSync/bin/Debug/net8.0/PdSync.exe trash restore docs path/to/file --config .\pdsync.yaml
 
 # Self-contained single-file exe -> dist/win-x64/PdSync.exe (smoke-tests --help)
 pwsh -NoProfile -File tools/publish.ps1 -Runtime win-x64
@@ -52,7 +53,8 @@ pwsh -NoProfile -File tools/live-smoke.ps1
 `--dry-run`, `--policy` (rebuild only), and `--limit` (listing commands) are
 recognized. `init`, `plan`, `run`, `doctor`, `status`, `history`, `ignore`,
 `trash`, and `rebuild` are implemented. `ignore` reports the deciding rule for
-a path and is read-only.
+a path and is read-only. `trash restore` is the only `trash` subcommand that
+mutates state or calls Proton; `trash list` stays read-only.
 
 ### Agent role skills
 
@@ -88,7 +90,8 @@ src/PdSync/
   Program.cs                 entry point -> CliApp.Run
   Cli/CliApp.cs              argument parsing, command handlers, human/JSON output
   Cli/InitCommand.cs         `init`: prompts, generated config/.pdignore, no-overwrite
-  Cli/TrashCommand.cs        `trash list|purge`: local retention, read-only list
+  Cli/TrashCommand.cs        `trash list|purge|restore`: local retention and
+                             name-unique remote restore (S15 fallback)
   Cli/HistoryCommand.cs      `history`: recent runs/action totals; read-only
   Cli/RebuildCommand.cs      `rebuild`: explicit-policy baseline recovery, backup/lock/confirm
   Diagnostics/
@@ -176,6 +179,9 @@ These are the easiest invariants to break. Check `SPEC.md` §2 for the full list
     `maxDeletePercent` exceeded → exit 6 before any deletion. `--force` bypasses.
 11. **One action = one pending journal row.** The pending row is written before
     the CLI call and removed inside the same transaction as the state commit.
+    A remote trash additionally writes its `remote_trash` undo record in its own
+    committed statement before `fs trash`; a local transaction cannot cover a
+    remote side effect, so the record survives a crash or a failed call.
 12. **Verification uses `claimedDigests.sha1` as a fingerprint, never as a
     security boundary.** Missing digest downgrades to size. `full` downloads
     uploads back; `sample` does so for missing digests (`samplePercent` defaults
@@ -357,7 +363,11 @@ Known gaps / likely next work:
   available for per-action detail; `history` reads `runs.stats_json` instead of
   parsing these logs.
 - `rebuild` is implemented with explicit `--policy`.
-- S15 restore-by-UID is not wired (restore is not used by the sync engine yet).
+- S15 restore-by-UID is **not available** in CLI 0.9.0. Remote trash actions
+  record `(path, path_key, remote_uid, trashed_at, run_id)` in the
+  `remote_trash` table, and `trash restore` restores only when the recorded
+  name is unique **and** its uid matches; ambiguity/mismatch exits 2 and points
+  at the Proton web app.
 - Directory rename detection is not implemented; file renames are.
 - Desktop-app mapping detection is implemented for the Windows desktop app's
   known per-user/machine-wide `Mappings.json` locations; other platforms are a

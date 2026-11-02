@@ -27,8 +27,15 @@ pdsync history [sync...]   recent runs and action totals; never writes
 pdsync ignore <path>       explain the ignore rule for a path; never writes
 pdsync trash list          list local trash runs; never writes
 pdsync trash purge --older-than <days> [--dry-run] [--yes]
+pdsync trash restore <sync> <path...> [--json] [--forget]
+                           undo a pdsync remote trash when the name + uid are unique
 pdsync rebuild <sync> --policy=<p> [--yes] [--dry-run]
 ```
+
+`trash restore` restores only when the recorded leaf name identifies exactly one
+node in `/trash` **and** its uid matches the recorded uid; a missing, duplicated,
+uid-mismatched, or re-synced path refuses with exit 2 and keeps the undo record.
+`--forget` drops the local record only (no Proton call).
 
 Options: `--config <path>`, `--sync <name>`, `--json`, `--verbose`, `--yes`,
 `--fast`, `--full`, `--force`, `--cleanup-staged` (run only) and

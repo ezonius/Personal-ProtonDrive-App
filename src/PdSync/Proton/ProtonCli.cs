@@ -251,6 +251,18 @@ public sealed class ProtonCli
         _ = document.RootElement;
     }
 
+    /// <summary>
+    /// Restores one trashed node by its <c>/trash/&lt;name&gt;</c> path. The CLI
+    /// (0.9.0) has no UID-addressed restore (S15), so callers must prove the
+    /// name is unique before calling. Non-replayable: a timed-out restore is
+    /// reconciled from the next <c>/trash</c> listing, never replayed blindly.
+    /// </summary>
+    public void Restore(string trashPath)
+    {
+        var result = Run(ProtonCallKind.NonReplayable, "fs", "restore", EscapePath(trashPath));
+        EnsureSuccess(result, trashPath);
+    }
+
     private IReadOnlyList<ProtonNode> ListRemote(string remotePath)
     {
         var result = Run(ProtonCallKind.Idempotent, "fs", "list", "--json", EscapePath(remotePath));
@@ -401,7 +413,12 @@ public sealed class ProtonCli
         ProtonFailureKind.Transient,
         result.Attempts);
 
-    private static JsonDocument ParseJson(CliResult result, string remotePath)
+    /// <summary>
+    /// Turns a non-success CLI result into the matching exception before any
+    /// JSON is required. Commands that do not emit JSON (for example
+    /// <c>fs restore</c>) still must not treat a failed process as success.
+    /// </summary>
+    private static void EnsureSuccess(CliResult result, string target)
     {
         if (result.ExitCode == 3)
         {
@@ -421,7 +438,7 @@ public sealed class ProtonCli
         if (result.TimedOut)
         {
             throw new ProtonCliException(
-                $"timed out after {result.Elapsed.TotalSeconds:0.#}s operating on {remotePath} " +
+                $"timed out after {result.Elapsed.TotalSeconds:0.#}s operating on {target} " +
                 $"(after {result.Attempts} attempt(s))",
                 result.Args,
                 result.ExitCode,
@@ -433,7 +450,12 @@ public sealed class ProtonCli
         }
 
         if (result.ExitCode != 0)
-            throw CommandFailure(result, remotePath);
+            throw CommandFailure(result, target);
+    }
+
+    private static JsonDocument ParseJson(CliResult result, string remotePath)
+    {
+        EnsureSuccess(result, remotePath);
 
         try
         {

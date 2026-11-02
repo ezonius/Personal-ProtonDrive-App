@@ -184,6 +184,138 @@ public sealed class CliFakeTests
         fixture.RemoteFileNames().Should().HaveCount(2);
     }
 
+    private static Fixture BothModified()
+    {
+        var fixture = new Fixture(defaults: "conflict: ask");
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "base");
+        fixture.WriteLocal("a.txt", "base");
+        var initial = fixture.Cli("run");
+        initial.ExitCode.Should().Be(0, initial.Stderr);
+
+        fixture.WriteLocal("a.txt", "local-content");
+        var remoteSource = fixture.Temp.Combine("remote-source", "a.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(remoteSource)!);
+        File.WriteAllText(remoteSource, "remote-content");
+        fixture.Fake("fs", "upload", "--json", "--file-conflict-strategy", "create-new-revision",
+            remoteSource, "/my-files/root");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
+        return fixture;
+    }
+
+    [Fact]
+    public void Run_AskInteractiveLocalChoice_UploadsAndExitsZero()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("l\n", isTty: true, "run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("conflict a.txt");
+        result.Stdout.Should().Contain("digests: differ");
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("local-content");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("local-content");
+    }
+
+    [Fact]
+    public void Run_AskInteractiveRemoteChoice_DownloadsAndExitsZero()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("r\n", isTty: true, "run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote-content");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
+    }
+
+    [Fact]
+    public void Run_AskInteractiveBothChoice_KeepsBothSides()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("b\n", isTty: true, "run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote-content");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().HaveCount(2);
+        fixture.RemoteFileNames().Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void Run_AskInteractiveSkip_LeavesBothSidesUntouchedAndExitsTwo()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("s\n", isTty: true, "run");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("local-content");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().ContainSingle();
+        fixture.InvocationCount("upload").Should().Be(1); // the setup upload only
+        result.Stdout.Should().Contain("conflict a.txt");
+    }
+
+    [Theory]
+    [InlineData("a\n")]
+    [InlineData("\n")]
+    [InlineData("wat\n")]
+    [InlineData("")]
+    public void Run_AskInteractiveAbortOrInvalid_AbortsAndExitsTwo(string input)
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin(input, isTty: true, "run");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("aborted [BothModified] a.txt");
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("local-content");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
+        fixture.InvocationCount("upload").Should().Be(1);
+    }
+
+    [Fact]
+    public void Run_AskNonTty_FallsBackToKeepBothWithoutPrompting()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("l\n", isTty: false, "run");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().NotContain("[l]ocal wins");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().HaveCount(2);
+        fixture.RemoteFileNames().Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void Run_AskWithYes_DoesNotPromptAndKeepsBoth()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("l\n", isTty: true, "run", "--yes");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().NotContain("[l]ocal wins");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void Run_AskJson_DoesNotPromptAndKeepsJsonClean()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("l\n", isTty: true, "run", "--json");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().NotContain("conflict a.txt");
+        result.Stdout.Should().NotContain("[l]ocal wins");
+        using var document = JsonDocument.Parse(result.Stdout);
+        document.RootElement.GetProperty("exitCode").GetInt32().Should().Be(2);
+        document.RootElement.GetProperty("syncs")[0].GetProperty("conflicts")[0]
+            .GetProperty("resolution").GetString().Should().Be("keepBoth");
+    }
+
     [Fact]
     public void FailedUpload_IsNotCommittedToState()
     {

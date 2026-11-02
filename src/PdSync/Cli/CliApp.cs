@@ -107,7 +107,7 @@ public static class CliApp
             return parsed.Command switch
             {
                 "plan" => Plan(config, parsed, output, error),
-                "run" => RunSync(config, parsed, output, error),
+                "run" => RunSync(config, parsed, input ?? Console.In, stdinIsTty, output, error),
                 "doctor" => Doctor(config, parsed, output, error, desktopMappings ?? new DesktopMappingDetector()),
                 "status" => Status(config, parsed, output, error),
                 "history" => HistoryCommand.Execute(config, SelectSyncs(config, parsed.SyncNames), parsed.Limit, parsed.Json, output),
@@ -218,8 +218,20 @@ public static class CliApp
         return exit;
     }
 
-    private static int RunSync(PdsyncConfig config, CliArguments args, TextWriter output, TextWriter error)
+    private static int RunSync(
+        PdsyncConfig config,
+        CliArguments args,
+        TextReader input,
+        bool? stdinIsTty,
+        TextWriter output,
+        TextWriter error)
     {
+        // A prompt is safe only when it can actually be answered: a real TTY,
+        // human-readable output, and no --yes. Anything else keeps the
+        // non-interactive keep-both fallback. `plan` never reaches this path.
+        var stdinIsTerminal = stdinIsTty ??
+            (!Console.IsInputRedirected && ReferenceEquals(input, Console.In));
+
         var syncs = SelectSyncs(config, args.SyncNames);
         if (syncs.Count == 0)
         {
@@ -234,10 +246,17 @@ public static class CliApp
             using var runLock = RunLock.Acquire(config, sync);
             try
             {
+                var canPrompt = !args.Json && !args.Yes && stdinIsTerminal &&
+                                sync.Options.Conflict == ConflictPolicy.Ask;
+                ConflictResolver? resolver = canPrompt
+                    ? conflicts => PromptConflicts(input, output, conflicts)
+                    : null;
+
                 var attempt = SyncService.Run(
                     config, sync, args.Fast || sync.Options.Fast, args.Full,
-                    args.Force, args.Interactive, args.Verbose,
-                    args.Json ? TextWriter.Null : output, args.CleanupStaged, error);
+                    args.Force, args.Interactive || canPrompt, args.Verbose,
+                    args.Json ? TextWriter.Null : output, args.CleanupStaged, error,
+                    resolver);
 
                 if (!args.Json)
                     WriteRun(output, sync, attempt);
@@ -257,7 +276,7 @@ public static class CliApp
                     prunedRemoteDirectories = attempt.Report?.PrunedRemoteDirectories ?? Array.Empty<string>(),
                 });
 
-                if (attempt.Plan.HasBlockingConflicts)
+                if (attempt.Plan.HasUnresolvedConflicts)
                     exit = Math.Max(exit, 2);
                 else if (attempt.Report?.Failed > 0)
                     exit = Math.Max(exit, 1);
@@ -289,6 +308,66 @@ public static class CliApp
             WriteJson(output, new { command = "run", syncs = results, exitCode = exit });
         return exit;
     }
+
+    /// <summary>
+    /// Asks one question per blocking both-modified conflict, in plan order.
+    /// Empty input, an unknown answer, or end-of-input aborts the current and
+    /// every remaining conflict; there is no destructive default.
+    /// </summary>
+    private static IReadOnlyDictionary<string, PlanResolution> PromptConflicts(
+        TextReader input,
+        TextWriter output,
+        IReadOnlyList<PlanConflict> conflicts)
+    {
+        var overrides = new Dictionary<string, PlanResolution>(StringComparer.Ordinal);
+        foreach (var conflict in conflicts)
+        {
+            output.WriteLine($"conflict {conflict.Path}");
+            output.WriteLine($"  local:  size {FormatSize(conflict.LocalSize)}, " +
+                             $"mtime {FormatMtime(conflict.LocalMtime)}");
+            output.WriteLine($"  remote: size {FormatSize(conflict.RemoteSize)}, " +
+                             $"mtime {FormatMtime(conflict.RemoteMtime)}");
+            output.WriteLine($"  digests: {DescribeDigests(conflict.DigestsDiffer)}");
+            output.Write("  [l]ocal wins  [r]emote wins  [b]oth  [s]kip  [a]bort: ");
+            output.Flush();
+
+            var answer = input.ReadLine()?.Trim().ToLowerInvariant();
+            switch (answer)
+            {
+                case "l":
+                    overrides[conflict.PathKey] = PlanResolution.LocalWins;
+                    break;
+                case "r":
+                    overrides[conflict.PathKey] = PlanResolution.RemoteWins;
+                    break;
+                case "b":
+                    overrides[conflict.PathKey] = PlanResolution.KeepBoth;
+                    break;
+                case "s":
+                    overrides[conflict.PathKey] = PlanResolution.Defer;
+                    break;
+                default:
+                    output.WriteLine("  aborting: no choice made");
+                    return overrides;
+            }
+        }
+
+        return overrides;
+    }
+
+    private static string FormatSize(long? size) =>
+        size is null ? "unknown" : size.Value.ToString(System.Globalization.CultureInfo.InvariantCulture) + " B";
+
+    private static string FormatMtime(DateTimeOffset? mtime) =>
+        mtime is null ? "unknown" : mtime.Value.ToUniversalTime().ToString("yyyy-MM-dd HH:mm:ss 'UTC'");
+
+    private static string DescribeDigests(bool? differ) =>
+        differ switch
+        {
+            true => "differ",
+            false => "identical",
+            _ => "unknown",
+        };
 
     private static int Doctor(
         PdsyncConfig config,

@@ -21,6 +21,7 @@ public sealed class PreparedSync : IDisposable
         LocalScan local,
         RemoteSnapshot remote,
         PlanResult plan,
+        PlanContext context,
         bool usedFastListing,
         int runsSinceFull)
     {
@@ -32,6 +33,7 @@ public sealed class PreparedSync : IDisposable
         Local = local;
         Remote = remote;
         Plan = plan;
+        Context = context;
         UsedFastListing = usedFastListing;
         RunsSinceFull = runsSinceFull;
     }
@@ -43,9 +45,17 @@ public sealed class PreparedSync : IDisposable
     public IReadOnlyList<EntryRecord> Baseline { get; }
     public LocalScan Local { get; }
     public RemoteSnapshot Remote { get; }
-    public PlanResult Plan { get; }
+    public PlanResult Plan { get; private set; }
+    internal PlanContext Context { get; }
     public bool UsedFastListing { get; }
     public int RunsSinceFull { get; }
+
+    /// <summary>
+    /// Replaces the plan after the CLI has collected interactive conflict
+    /// choices. Only the pure planner is rerun; snapshots and state are the
+    /// already-prepared ones, so no second remote listing happens.
+    /// </summary>
+    internal void ApplyPlan(PlanResult plan) => Plan = plan;
 
     public void Dispose() => State.Dispose();
 }
@@ -101,7 +111,8 @@ public static class SyncService
         bool verbose,
         TextWriter output,
         bool cleanupStaged,
-        TextWriter? diagnostics = null)
+        TextWriter? diagnostics = null,
+        ConflictResolver? conflictResolver = null)
     {
         var diagnosticsWriter = diagnostics ?? output;
         using var prepared = Prepare(config, sync, readOnly: false, fastRequested, fullRequested,
@@ -117,6 +128,26 @@ public static class SyncService
             prepared.State.ClearPending();
             warning = $"cleared {pending.Count} stale pending row(s) from an interrupted run";
             diagnosticsWriter.WriteLine("warning: " + warning);
+        }
+
+        if (prepared.Plan.HasBlockingConflicts && conflictResolver is not null)
+        {
+            // Only both-changed conflicts under `ask` reach this list; kind
+            // mismatches, collisions, and delete-vs-modify never prompt.
+            var promptable = prepared.Plan.Conflicts
+                .Where(c => c.Resolution == PlanResolution.Abort &&
+                            c.Kind == PlanConflictKind.BothModified)
+                .ToList();
+            if (promptable.Count > 0)
+            {
+                var overrides = conflictResolver(promptable);
+                if (overrides.Count > 0)
+                {
+                    var context = prepared.Context with { ConflictOverrides = overrides };
+                    prepared.ApplyPlan(Planner.Plan(
+                        prepared.Baseline, prepared.Local, prepared.Remote, sync, context));
+                }
+            }
         }
 
         SafetyGuard.CheckDeletionBudget(
@@ -236,15 +267,11 @@ public static class SyncService
             var remote = RemoteIndex.Build(cli, sync.RemoteRoot,
                 useFast ? baseByKey : null, useFast ? predicate : null);
 
-            var plan = Planner.Plan(
-                baseline,
-                local,
-                remote,
-                sync,
-                new PlanContext(DateTimeOffset.UtcNow, interactive, cleanupStaged));
+            var context = new PlanContext(DateTimeOffset.UtcNow, interactive, cleanupStaged);
+            var plan = Planner.Plan(baseline, local, remote, sync, context);
 
             return new PreparedSync(
-                config, sync, cli, state, baseline, local, remote, plan,
+                config, sync, cli, state, baseline, local, remote, plan, context,
                 usedFastListing: useFast, runsSinceFull);
         }
         catch

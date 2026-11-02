@@ -81,7 +81,9 @@ Global flags: `--config <path>`, `--verbose`, `--json`, `--no-color`, `--yes`.
 Per-run flags: `--fast` (incremental remote listing), `--full` (force a complete
 scan, overriding `--fast`), `--force` (override the deletion budget), and
 `--cleanup-staged` (run only: also Proton-Trash adopted/historical staging
-leftovers, §6.2). `plan` accepts the same scan flags so its output matches the
+leftovers, §6.2). `run` prompts for `conflict: ask` only on a TTY without
+`--json`/`--yes` (§5.2); every other case keeps the non-interactive fallback.
+`plan` accepts the same scan flags so its output matches the
 run it predicts; it rejects `--cleanup-staged` (exit 1) so a normal `plan` is
 never a preview of the opt-in cleanup divergence.
 
@@ -524,7 +526,7 @@ Policy (`conflict:`) applies to both-changed files:
 | `local-wins` | Upload local as the new revision of the remote file. Remote's previous revision remains in history (Proton keeps revisions); the current remote content is overwritten. |
 | `remote-wins` | Download remote over local; the replaced local file is moved to local trash first. |
 | `newer-wins` **(default)** | Compare local mtime vs remote `claimedModificationTime`. If the difference is ≤ `mtimeToleranceMs`, or either timestamp is in the future by more than the tolerance, fall back to `keep-both`. Otherwise the newer side wins: upload for local, download for remote. The decision and both timestamps are written to the run report. |
-| `ask` | Print a diff summary and prompt (only in a TTY). Non-interactive runs downgrade to `keep-both` and exit 2. |
+| `ask` | In a TTY `run` (no `--json`/`--yes`), prompt once per both-modified file with a compact summary and `[l]ocal wins` / `[r]emote wins` / `[b]oth` / `[s]kip` / `[a]bort`. `l`/`r`/`b` apply that resolution; `s` defers the path (no action, listed as skipped); `a`, an empty line, unknown input, or EOF aborts this and all remaining conflicts. Non-interactive `run`s, `--json`, and `--yes` fall back to `keep-both` and exit 2; `plan` stays read-only and reports the keep-both plan without executing. |
 
 `newer-wins` is a heuristic, not a truth: `claimedModificationTime` is supplied
 by whichever client uploaded the revision, so clocks can disagree. The tolerance
@@ -536,8 +538,12 @@ Delete-vs-modify is always resolved **in favor of the surviving content**, with 
 warning, regardless of policy: never destroy a modification because the other
 side deleted a file.
 
-`conflict: ask` never blocks a scheduled run: without a TTY it behaves as
-`keep-both` and returns exit 2.
+`conflict: ask` never blocks a scheduled run: a `run` without a TTY behaves as
+`keep-both` and returns exit 2. The prompt is used only when the command is
+`run`, the sync policy is `ask`, the plan has both-modified abort conflicts,
+stdin is a TTY, and neither `--json` nor `--yes` was given. A run where every
+conflict received `l`, `r`, or `b` and every action succeeded exits 0; a run
+with any deferred (`s`) or still-aborting path exits 2.
 
 ### 5.3 Initial adoption (B is absent, both sides exist)
 

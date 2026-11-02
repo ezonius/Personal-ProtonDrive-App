@@ -92,6 +92,12 @@ public enum PlanResolution
     LocalWins,
     RemoteWins,
     Abort,
+
+    /// <summary>
+    /// The user postponed this path for the current run. No action is taken and
+    /// no baseline row is committed; the next run evaluates it again.
+    /// </summary>
+    Defer,
 }
 
 public sealed record PlanConflict(
@@ -101,7 +107,18 @@ public sealed record PlanConflict(
     PlanResolution Resolution,
     string Message,
     DateTimeOffset? LocalMtime = null,
-    DateTimeOffset? RemoteMtime = null);
+    DateTimeOffset? RemoteMtime = null,
+    long? LocalSize = null,
+    long? RemoteSize = null,
+    bool? DigestsDiffer = null,
+    bool AskFallback = false);
+
+/// <summary>
+/// CLI-supplied conflict choices for one run. The planner remains pure: it only
+/// consumes the resolution map, never prompts or reads a clock.
+/// </summary>
+public delegate IReadOnlyDictionary<string, PlanResolution> ConflictResolver(
+    IReadOnlyList<PlanConflict> blockingConflicts);
 
 public enum PlanSkipReason
 {
@@ -112,6 +129,7 @@ public enum PlanSkipReason
     IncompleteRemoteScan,
     PolicyKeep,
     Unsupported,
+    Deferred,
 }
 
 public sealed record PlanSkip(string Path, string PathKey, PlanSkipReason Reason, string Message);
@@ -168,12 +186,30 @@ public sealed class PlanResult
     public bool HasBlockingConflicts => Conflicts.Any(c => c.Resolution == PlanResolution.Abort);
 
     public bool CanExecute => !HasBlockingConflicts;
+
+    /// <summary>
+    /// Paths the user explicitly deferred through an interactive prompt. They are
+    /// not blocking conflicts (no action was attempted), but the run is still
+    /// unresolved and must exit 2.
+    /// </summary>
+    public bool HasDeferredConflicts => Skipped.Any(s => s.Reason == PlanSkipReason.Deferred);
+
+    /// <summary>
+    /// A non-interactive <c>ask</c> run that fell back to keep-both. The plan can
+    /// execute, but the conflict was not actually resolved, so the caller exits 2
+    /// exactly as the ask policy documents.
+    /// </summary>
+    public bool HasAskFallback => Conflicts.Any(c => c.AskFallback);
+
+    public bool HasUnresolvedConflicts =>
+        HasBlockingConflicts || HasDeferredConflicts || HasAskFallback;
 }
 
 public sealed record PlanContext(
     DateTimeOffset Now,
     bool Interactive = false,
-    bool CleanupStaged = false)
+    bool CleanupStaged = false,
+    IReadOnlyDictionary<string, PlanResolution>? ConflictOverrides = null)
 {
     public static PlanContext Default => new(DateTimeOffset.UtcNow);
 }

@@ -45,6 +45,7 @@ public static class RebuildCommand
         bool verbose,
         bool json,
         TextReader input,
+        bool? stdinIsTty,
         TextWriter output,
         TextWriter error)
     {
@@ -82,13 +83,27 @@ public static class RebuildCommand
         if (dryRun)
         {
             using var prepared = SyncService.PrepareForRebuildPreview(config, effectiveSync);
-            var counts = Counts.From(prepared.Plan);
-            WritePreview(json ? error : output, sync, policyName, prepared.Plan, dryRun: true);
+            var previewPlan = prepared.Plan;
+            var previewWriter = json ? error : output;
+            WritePreview(previewWriter, sync, policyName, previewPlan, dryRun: true);
+            if (previewPlan.HasBlockingConflicts)
+            {
+                WriteBlockingConflicts(previewWriter, previewPlan);
+                if (json)
+                    WriteJson(output, ResultJson(sync, policyName, previewPlan, Counts.From(previewPlan),
+                        dryRun: true, backup: null, succeeded: 0, failed: 0, skipped: 0, exitCode: 2));
+                return 2;
+            }
+
             if (json)
-                WriteJson(output, ResultJson(sync, policyName, prepared.Plan, counts, dryRun: true,
-                    backup: null, succeeded: 0, failed: 0, skipped: 0, exitCode: 0));
+                WriteJson(output, ResultJson(sync, policyName, previewPlan, Counts.From(previewPlan),
+                    dryRun: true, backup: null, succeeded: 0, failed: 0, skipped: 0, exitCode: 0));
             return 0;
         }
+
+        // Lock precedes all remote work, so a held lock exits 5 without any
+        // listing or other side effect.
+        using var runLock = RunLock.Acquire(config, sync);
 
         PlanResult preview;
         using (var prepared = SyncService.PrepareForRebuildPreview(config, effectiveSync))
@@ -96,10 +111,18 @@ public static class RebuildCommand
 
         var promptWriter = json ? error : output;
         WritePreview(promptWriter, sync, policyName, preview, dryRun: false);
+        if (preview.HasBlockingConflicts)
+        {
+            WriteBlockingConflicts(promptWriter, preview);
+            if (json)
+                WriteJson(output, ResultJson(sync, policyName, preview, Counts.From(preview),
+                    dryRun: false, backup: null, succeeded: 0, failed: 0, skipped: 0, exitCode: 2));
+            return 2;
+        }
 
         if (!yes)
         {
-            if (!IsInteractive(input))
+            if (!IsInteractive(input, stdinIsTty))
             {
                 error.WriteLine("pdsync: rebuild requires --yes when not interactive");
                 return 1;
@@ -123,10 +146,6 @@ public static class RebuildCommand
             }
         }
 
-        // Take the lock only after confirmation so a refusal leaves no lock
-        // directory (or any other filesystem side effect) behind.
-        using var runLock = RunLock.Acquire(config, sync);
-
         var backup = BackupAndClearState(config, sync);
         if (backup is not null && !json)
             output.WriteLine($"  state backup: {backup}");
@@ -143,7 +162,7 @@ public static class RebuildCommand
         var succeeded = attempt.Report?.Succeeded ?? 0;
         var failed = attempt.Report?.Failed ?? 0;
         var skipped = attempt.Report?.Skipped ?? 0;
-        var exitCode = attempt.Plan.HasBlockingConflicts || failed > 0 ? 1 : 0;
+        var exitCode = attempt.Plan.HasBlockingConflicts ? 2 : failed > 0 ? 1 : 0;
 
         if (!json)
         {
@@ -242,8 +261,8 @@ public static class RebuildCommand
         return backupPath;
     }
 
-    private static bool IsInteractive(TextReader input) =>
-        ReferenceEquals(input, Console.In) && !Console.IsInputRedirected;
+    private static bool IsInteractive(TextReader input, bool? stdinIsTty) =>
+        stdinIsTty ?? (ReferenceEquals(input, Console.In) && !Console.IsInputRedirected);
 
     private sealed record Counts(int Recorded, int Uploaded, int Downloaded, int ConflictRenamed)
     {
@@ -269,6 +288,12 @@ public static class RebuildCommand
             $"{plan.Stats.Actions} action(s), {plan.Stats.Conflicts} conflict(s), {plan.Stats.Skipped} skipped");
     }
 
+    private static void WriteBlockingConflicts(TextWriter output, PlanResult plan)
+    {
+        foreach (var conflict in plan.Conflicts.Where(c => c.Resolution == PlanResolution.Abort))
+            output.WriteLine($"  aborted [{conflict.Kind}] {conflict.Path}: {conflict.Message}");
+    }
+
     private static object ResultJson(
         SyncConfig sync,
         string policy,
@@ -291,6 +316,13 @@ public static class RebuildCommand
             conflictRenamed = counts.ConflictRenamed,
             actions = plan.Stats.Actions,
             conflicts = plan.Stats.Conflicts,
+            conflictList = plan.Conflicts.Select(conflict => new
+            {
+                path = conflict.Path,
+                kind = conflict.Kind.ToString(),
+                resolution = conflict.Resolution.ToString(),
+                message = conflict.Message,
+            }),
             skippedActions = plan.Stats.Skipped,
             backup,
             succeeded,

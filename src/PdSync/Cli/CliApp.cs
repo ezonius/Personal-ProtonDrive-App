@@ -30,7 +30,8 @@ public static class CliApp
         TextWriter error,
         IDesktopMappingDetector? desktopMappings = null,
         TextReader? input = null,
-        Func<string?>? configDiscovery = null)
+        Func<string?>? configDiscovery = null,
+        bool? stdinIsTty = null)
     {
         CliArguments parsed;
         try
@@ -55,6 +56,12 @@ public static class CliApp
         if (parsed.CleanupStaged && parsed.Command is not "run")
         {
             error.WriteLine("pdsync: --cleanup-staged is only valid with run");
+            return 1;
+        }
+
+        if (parsed.Policy is not null && parsed.Command != "rebuild")
+        {
+            error.WriteLine("pdsync: --policy is only valid with rebuild");
             return 1;
         }
 
@@ -105,7 +112,7 @@ public static class CliApp
                 "status" => Status(config, parsed, output, error),
                 "ignore" => Ignore(config, parsed, output, error),
                 "trash" => Trash(config, parsed, input ?? Console.In, output, error),
-                "rebuild" => Rebuild(config, parsed, input ?? Console.In, output, error),
+                "rebuild" => Rebuild(config, parsed, input ?? Console.In, stdinIsTty, output, error),
                 _ => Unknown(parsed.Command, error),
             };
         }
@@ -706,13 +713,14 @@ public static class CliApp
         PdsyncConfig config,
         CliArguments args,
         TextReader input,
+        bool? stdinIsTty,
         TextWriter output,
         TextWriter error) =>
         RebuildCommand.Execute(
             config, args.SyncNames, args.Policy,
             args.Fast, args.Full, args.Force, args.CleanupStaged, args.Interactive,
             args.OlderThanDays, args.Yes, args.DryRun, args.Verbose, args.Json,
-            input, output, error);
+            input, stdinIsTty, output, error);
 
     private static int Trash(
         PdsyncConfig config,

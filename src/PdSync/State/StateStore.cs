@@ -209,7 +209,9 @@ public sealed class StateStore : IDisposable
             }
             else
             {
-                Migrate(connection, databasePath, existed);
+                // An in-memory preview must never take the writable migration /
+                // backup path just because a file happens to exist on disk.
+                Migrate(connection, databasePath, existed && !inMemory);
             }
 
             var store = new StateStore(

@@ -377,8 +377,11 @@ public static class CliApp
             // explicit run --cleanup-staged opt-in; doctor only reports them.
             try
             {
-                using var baselineState = StateStore.OpenReadOnly(config, sync);
+                // Config errors must win over state findings: load the ignore
+                // file before opening state so a malformed .pdignore always
+                // exits 4, even when the schema is not current.
                 var ignoreRules = IgnoreRules.Load(sync);
+                using var baselineState = StateStore.OpenReadOnly(config, sync);
                 // Frozen and ignored baseline entries are not actionable by
                 // run --cleanup-staged (those skips run before the opt-in
                 // branch), so they are excluded from the report. Local
@@ -410,6 +413,25 @@ public static class CliApp
             {
                 throw;
             }
+            catch (IgnoreRulesException)
+            {
+                // A malformed .pdignore is a config error (exit 4), the same
+                // mapping plan/run/ignore use. Do not turn it into a FAIL check.
+                throw;
+            }
+            catch (StateSchemaMismatchException)
+            {
+                // The state probe below owns the single schema warning for this
+                // sync. Skip this probe quietly instead of duplicating it.
+                checks.Add(new DoctorCheck($"sync {sync.Name} staged leftovers", true,
+                    "skipped: state schema not current"));
+            }
+            catch (StateSchemaTooNewException)
+            {
+                // Newer schemas are a failure, reported once by the state probe.
+                checks.Add(new DoctorCheck($"sync {sync.Name} staged leftovers", true,
+                    "skipped: state schema is newer than this build"));
+            }
             catch (Exception ex)
             {
                 failed = true;
@@ -425,17 +447,18 @@ public static class CliApp
 
             try
             {
-                var dbPath = Path.Combine(config.StateDir, "state",
-                    StateStore.ComputeSyncId(sync.LocalRoot, sync.RemoteRoot) + ".sqlite");
-                using var state = File.Exists(dbPath)
-                    ? StateStore.Open(config, sync)
-                    : StateStore.OpenReadOnly(config, sync);
+                using var state = StateStore.OpenReadOnly(config, sync);
                 var count = state.CountEntries(includeFrozen: true);
                 var runs = FastScanTracker.ReadRunsSinceFull(config, sync);
                 checks.Add(new DoctorCheck($"sync {sync.Name} state", true,
                     state.IsInMemory
                         ? "no state DB yet (initial adoption)"
                         : $"{count} entries, {runs} fast run(s) since full listing"));
+            }
+            catch (StateSchemaMismatchException ex)
+            {
+                checks.Add(new DoctorCheck($"sync {sync.Name} state", true, ex.Message,
+                    Warning: true));
             }
             catch (Exception ex)
             {

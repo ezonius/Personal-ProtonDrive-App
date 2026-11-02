@@ -550,7 +550,10 @@ side deleted a file.
 `run`, the sync policy is `ask`, the plan has both-modified abort conflicts,
 stdin is a TTY, and neither `--json` nor `--yes` was given. A run where every
 conflict received `l`, `r`, or `b` and every action succeeded exits 0; a run
-with any deferred (`s`) or still-aborting path exits 2.
+with any deferred (`s`) or still-aborting path exits 2. Deferred paths are
+listed as `deferred this run` in human output and in the run JSON `deferred`
+array, and a run that only deferred paths is recorded in `history` with status
+`conflict` so the recorded status matches the exit code.
 
 ### 5.3 Initial adoption (B is absent, both sides exist)
 

@@ -207,6 +207,7 @@ public sealed class CliFakeTests
     public void Run_AskInteractiveLocalChoice_UploadsAndExitsZero()
     {
         using var fixture = BothModified();
+        var promptedListsBefore = fixture.InvocationCount("list");
 
         var result = fixture.CliWithStdin("l\n", isTty: true, "run");
 
@@ -215,6 +216,16 @@ public sealed class CliFakeTests
         result.Stdout.Should().Contain("digests: differ");
         File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("local-content");
         fixture.RemoteFile("/my-files/root/a.txt").Should().Be("local-content");
+        // The prompted re-plan reuses the prepared snapshots. A non-interactive
+        // keep-both run on an identical fixture performs the same single
+        // prepare, so the prompted run must not list any more often.
+        using var baseline = BothModified();
+        var baselineListsBefore = baseline.InvocationCount("list");
+        baseline.CliWithStdin("", isTty: false, "run").ExitCode.Should().Be(2);
+        var baselineListingDelta = baseline.InvocationCount("list") - baselineListsBefore;
+        var promptedListingDelta = fixture.InvocationCount("list") - promptedListsBefore;
+        baselineListingDelta.Should().BeGreaterThan(0);
+        promptedListingDelta.Should().Be(baselineListingDelta);
     }
 
     [Fact]
@@ -225,6 +236,10 @@ public sealed class CliFakeTests
         var result = fixture.CliWithStdin("r\n", isTty: true, "run");
 
         result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        // The prompt only exists on the interactive override path; the
+        // non-interactive base falls back to keep-both without it.
+        result.Stdout.Should().Contain("conflict a.txt");
+        result.Stdout.Should().Contain("[r]emote wins");
         File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote-content");
         fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
     }
@@ -237,6 +252,8 @@ public sealed class CliFakeTests
         var result = fixture.CliWithStdin("b\n", isTty: true, "run");
 
         result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("conflict a.txt");
+        result.Stdout.Should().Contain("[b]oth");
         File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote-content");
         Directory.GetFiles(fixture.Local, "a*.txt").Should().HaveCount(2);
         fixture.RemoteFileNames().Should().HaveCount(2);
@@ -255,6 +272,12 @@ public sealed class CliFakeTests
         Directory.GetFiles(fixture.Local, "a*.txt").Should().ContainSingle();
         fixture.InvocationCount("upload").Should().Be(1); // the setup upload only
         result.Stdout.Should().Contain("conflict a.txt");
+        result.Stdout.Should().Contain("deferred this run a.txt");
+
+        var history = fixture.Cli("history", "--json");
+        using var document = JsonDocument.Parse(history.Stdout);
+        document.RootElement.GetProperty("syncs")[0].GetProperty("runs")[0]
+            .GetProperty("status").GetString().Should().Be("conflict");
     }
 
     [Theory]
@@ -314,6 +337,8 @@ public sealed class CliFakeTests
         document.RootElement.GetProperty("exitCode").GetInt32().Should().Be(2);
         document.RootElement.GetProperty("syncs")[0].GetProperty("conflicts")[0]
             .GetProperty("resolution").GetString().Should().Be("keepBoth");
+        document.RootElement.GetProperty("syncs")[0].GetProperty("deferred")
+            .GetArrayLength().Should().Be(0);
     }
 
     [Fact]

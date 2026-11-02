@@ -66,7 +66,7 @@ public sealed class PreparedSync : IDisposable
     /// store starts from the empty baseline the plan was computed against.
     /// </summary>
     internal PreparedSync WithState(StateStore state) =>
-        new(Config, Sync, Cli, state, Baseline, Local, Remote, Plan,
+        new(Config, Sync, Cli, state, Baseline, Local, Remote, Plan, Context,
             UsedFastListing, RunsSinceFull);
 }
 
@@ -140,7 +140,8 @@ public static class SyncService
     {
         using var prepared = Prepare(config, sync, readOnly: false, fastRequested, fullRequested,
             interactive, cleanupStaged);
-        return RunPrepared(prepared, fastRequested, force, verbose, output, cleanupStaged, diagnostics);
+        return RunPrepared(prepared, fastRequested, force, verbose, output, cleanupStaged,
+            diagnostics, conflictResolver);
     }
 
     /// <summary>
@@ -154,7 +155,8 @@ public static class SyncService
         bool verbose,
         TextWriter output,
         bool cleanupStaged,
-        TextWriter? diagnostics = null)
+        TextWriter? diagnostics = null,
+        ConflictResolver? conflictResolver = null)
     {
         var config = prepared.Config;
         var sync = prepared.Sync;
@@ -221,8 +223,10 @@ public static class SyncService
                 log);
 
             var report = executor.Execute();
+            // A deferred `ask` path is unresolved even though no action failed;
+            // record it as a conflict so history matches the exit code.
             var status = report.Failed == 0
-                ? (prepared.Plan.Conflicts.Count > 0 ? "conflict" : "ok")
+                ? (prepared.Plan.HasUnresolvedConflicts ? "conflict" : "ok")
                 : "partial";
             prepared.State.FinishRun(runId, status, JsonSerializer.Serialize(new
             {

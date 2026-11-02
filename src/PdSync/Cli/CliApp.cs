@@ -272,6 +272,9 @@ public static class CliApp
                     succeeded = attempt.Report?.Succeeded ?? 0,
                     failed = attempt.Report?.Failed ?? 0,
                     skipped = attempt.Report?.Skipped ?? 0,
+                    deferred = attempt.Plan.Skipped
+                        .Where(s => s.Reason == PlanSkipReason.Deferred)
+                        .Select(s => new { s.Path, s.Message }),
                     durationMs = attempt.DurationMs,
                     prunedRemoteDirectories = attempt.Report?.PrunedRemoteDirectories ?? Array.Empty<string>(),
                 });
@@ -885,6 +888,9 @@ public static class CliApp
             $"run {sync.Name}: planned {attempt.Plan.Stats.Actions}, " +
             $"succeeded {attempt.Report?.Succeeded ?? 0}, failed {attempt.Report?.Failed ?? 0}, " +
             $"skipped {attempt.Report?.Skipped ?? 0} in {attempt.DurationMs} ms");
+        foreach (var skip in attempt.Plan.Skipped.Where(s => s.Reason == PlanSkipReason.Deferred))
+            output.WriteLine($"  deferred this run {skip.Path}: {skip.Message}");
+
         if (attempt.Report is null)
         {
             foreach (var conflict in attempt.Plan.Conflicts.Where(c => c.Resolution == PlanResolution.Abort))

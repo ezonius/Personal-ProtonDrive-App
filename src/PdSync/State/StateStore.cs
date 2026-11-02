@@ -49,9 +49,23 @@ public sealed record RunRecord(
     string Status,
     string? StatsJson);
 
-public sealed class StateException : Exception
+public class StateException : Exception
 {
     public StateException(string message)
+        : base(message)
+    {
+    }
+}
+
+/// <summary>
+/// Raised by the read-only schema check when an existing database was written
+/// by a different schema version. Only <see cref="StateStore.OpenReadOnly"/> uses
+/// this; a writable open migrates instead. Callers that must not write state
+/// (for example <c>doctor</c>) can report it as a warning rather than a failure.
+/// </summary>
+public sealed class StateSchemaMismatchException : StateException
+{
+    public StateSchemaMismatchException(string message)
         : base(message)
     {
     }
@@ -158,9 +172,9 @@ public sealed class StateStore : IDisposable
                 var version = ReadUserVersion(connection);
                 if (version != SchemaVersion)
                 {
-                    throw new StateException(
+                    throw new StateSchemaMismatchException(
                         $"State database schema v{version} is not current (v{SchemaVersion}); " +
-                        "run pdsync doctor or pdsync run to migrate it.");
+                        "run pdsync run to migrate it.");
                 }
             }
             else

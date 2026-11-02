@@ -328,7 +328,8 @@ public sealed class StateStoreTests : IDisposable
         }
 
         var act = () => StateStore.OpenReadOnly(config, sync);
-        act.Should().Throw<StateException>().WithMessage("*not current*");
+        act.Should().Throw<StateSchemaMismatchException>()
+            .WithMessage("*not current*run pdsync run to migrate it*");
     }
 
     [Fact]

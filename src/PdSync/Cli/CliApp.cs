@@ -410,6 +410,19 @@ public static class CliApp
             {
                 throw;
             }
+            catch (IgnoreRulesException)
+            {
+                // A malformed .pdignore is a config error (exit 4), the same
+                // mapping plan/run/ignore use. Do not turn it into a FAIL check.
+                throw;
+            }
+            catch (StateSchemaMismatchException ex)
+            {
+                // doctor is read-only toward state: an older schema is a
+                // warning, never a migration and never a failure.
+                checks.Add(new DoctorCheck($"sync {sync.Name} staged leftovers", true, ex.Message,
+                    Warning: true));
+            }
             catch (Exception ex)
             {
                 failed = true;
@@ -425,17 +438,18 @@ public static class CliApp
 
             try
             {
-                var dbPath = Path.Combine(config.StateDir, "state",
-                    StateStore.ComputeSyncId(sync.LocalRoot, sync.RemoteRoot) + ".sqlite");
-                using var state = File.Exists(dbPath)
-                    ? StateStore.Open(config, sync)
-                    : StateStore.OpenReadOnly(config, sync);
+                using var state = StateStore.OpenReadOnly(config, sync);
                 var count = state.CountEntries(includeFrozen: true);
                 var runs = FastScanTracker.ReadRunsSinceFull(config, sync);
                 checks.Add(new DoctorCheck($"sync {sync.Name} state", true,
                     state.IsInMemory
                         ? "no state DB yet (initial adoption)"
                         : $"{count} entries, {runs} fast run(s) since full listing"));
+            }
+            catch (StateSchemaMismatchException ex)
+            {
+                checks.Add(new DoctorCheck($"sync {sync.Name} state", true, ex.Message,
+                    Warning: true));
             }
             catch (Exception ex)
             {

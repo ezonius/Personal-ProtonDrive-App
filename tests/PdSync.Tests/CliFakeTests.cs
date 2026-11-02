@@ -441,6 +441,197 @@ public sealed class CliFakeTests
         stats.Should().Contain("\"logFile\"").And.Contain("\"failed\":1");
     }
 
+    [Fact]
+    public void History_ShowsBothRunsNewestFirst()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        fixture.WriteLocal("a.txt", "alpha2");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        using var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single());
+        var ids = state.LoadRuns(10).Select(run => run.Id).ToList();
+        ids.Should().HaveCount(2);
+
+        var result = fixture.Cli("history");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain($"run {ids[0]}");
+        result.Stdout.Should().Contain($"run {ids[1]}");
+        result.Stdout.IndexOf($"run {ids[0]}", StringComparison.Ordinal)
+            .Should().BeLessThan(result.Stdout.IndexOf($"run {ids[1]}", StringComparison.Ordinal));
+        result.Stdout.Should().Contain("ok");
+        result.Stdout.Should().Contain("planned");
+    }
+
+    [Fact]
+    public void History_LimitReturnsExactlyOneRun()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        fixture.WriteLocal("a.txt", "alpha2");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        foreach (var args in new[] { new[] { "history", "--limit", "1" }, new[] { "history", "--limit=1" } })
+        {
+            var result = fixture.Cli(args);
+            result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+            result.Stdout.Split('\n').Count(line => line.Contains("run ", StringComparison.Ordinal))
+                .Should().Be(1);
+        }
+
+        var json = fixture.Cli("history", "--limit", "1", "--json");
+        using var document = JsonDocument.Parse(json.Stdout);
+        document.RootElement.GetProperty("limit").GetInt32().Should().Be(1);
+        document.RootElement.GetProperty("syncs")[0]
+            .GetProperty("runs").GetArrayLength().Should().Be(1);
+    }
+
+    [Fact]
+    public void History_SyncFilterByPositionalAndOption()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        AddEmptySync(fixture, "extra");
+
+        foreach (var args in new[] { new[] { "history", "docs" }, new[] { "history", "--sync", "docs" } })
+        {
+            var result = fixture.Cli(args);
+            result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+            result.Stdout.Should().Contain("run ");
+            result.Stdout.Should().NotContain("extra");
+        }
+
+        var all = fixture.Cli("history");
+        all.ExitCode.Should().Be(0, all.Stdout + all.Stderr);
+        all.Stdout.Should().Contain("docs:");
+        all.Stdout.Should().Contain("extra: no runs recorded");
+
+        var extra = fixture.Cli("history", "extra");
+        extra.ExitCode.Should().Be(0, extra.Stdout + extra.Stderr);
+        extra.Stdout.Should().Contain("no runs recorded");
+        extra.Stdout.Should().NotContain("run ");
+    }
+
+    [Fact]
+    public void History_WithoutStateDirectoryCreatesNothing()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        var before = Directory.GetFileSystemEntries(fixture.StateDir)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        var result = fixture.Cli("history");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("no runs recorded");
+        Directory.GetFileSystemEntries(fixture.StateDir)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .Should().Equal(before);
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        Directory.Exists(Path.Combine(fixture.StateDir, "logs")).Should().BeFalse();
+        Directory.Exists(Path.Combine(fixture.StateDir, "locks")).Should().BeFalse();
+    }
+
+    [Fact]
+    public void History_MalformedStatsJsonKeepsRowWithNullSummary()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        var sync = fixture.Config.Syncs.Single();
+        var dbPath = Path.Combine(fixture.StateDir, "state",
+            StateStore.ComputeSyncId(sync.LocalRoot, sync.RemoteRoot) + ".sqlite");
+        using (var connection = new SqliteConnection($"Data Source={dbPath};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "UPDATE runs SET stats_json = '{ not json';";
+            command.ExecuteNonQuery();
+        }
+
+        var human = fixture.Cli("history");
+        human.ExitCode.Should().Be(0, human.Stdout + human.Stderr);
+        human.Stdout.Should().Contain("run ");
+
+        var json = fixture.Cli("history", "--json");
+        json.ExitCode.Should().Be(0, json.Stdout + json.Stderr);
+        using var document = JsonDocument.Parse(json.Stdout);
+        var run = document.RootElement.GetProperty("syncs")[0].GetProperty("runs")[0];
+        run.GetProperty("planned").ValueKind.Should().Be(JsonValueKind.Null);
+        run.GetProperty("succeeded").ValueKind.Should().Be(JsonValueKind.Null);
+    }
+
+    [Fact]
+    public void History_JsonHasDocumentedShape()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        var result = fixture.Cli("history", "--json");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        using var document = JsonDocument.Parse(result.Stdout);
+        var root = document.RootElement;
+        root.GetProperty("command").GetString().Should().Be("history");
+        root.GetProperty("limit").GetInt32().Should().Be(20);
+        var sync = root.GetProperty("syncs")[0];
+        sync.GetProperty("sync").GetString().Should().Be("docs");
+        sync.GetProperty("state").ValueKind.Should().Be(JsonValueKind.String);
+        sync.GetProperty("pending").GetInt32().Should().Be(0);
+        var run = sync.GetProperty("runs")[0];
+        run.GetProperty("id").GetInt64().Should().BePositive();
+        run.GetProperty("status").GetString().Should().Be("ok");
+        run.GetProperty("startedAt").ValueKind.Should().Be(JsonValueKind.String);
+        run.GetProperty("finishedAt").ValueKind.Should().Be(JsonValueKind.String);
+        var planned = run.GetProperty("planned");
+        planned.GetProperty("considered").GetInt32().Should().BeGreaterThanOrEqualTo(0);
+        planned.GetProperty("actions").GetInt32().Should().Be(1);
+        planned.GetProperty("uploads").GetInt32().Should().Be(1);
+        planned.GetProperty("downloads").GetInt32().Should().Be(0);
+        planned.GetProperty("deletions").GetInt32().Should().Be(0);
+        planned.GetProperty("adoptions").GetInt32().Should().Be(0);
+        planned.GetProperty("conflicts").GetInt32().Should().Be(0);
+        planned.GetProperty("skipped").GetInt32().Should().Be(0);
+        run.GetProperty("succeeded").GetInt32().Should().Be(1);
+        run.GetProperty("failed").GetInt32().Should().Be(0);
+        run.GetProperty("skipped").GetInt32().Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    [InlineData("abc")]
+    [InlineData("501")]
+    public void History_InvalidLimitIsUsageError(string value)
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+
+        var result = fixture.Cli("history", "--limit", value);
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("--limit requires a number between 1 and 500");
+    }
+
+    private static void AddEmptySync(Fixture fixture, string name)
+    {
+        var local = fixture.Local + "-" + name;
+        Directory.CreateDirectory(local);
+        File.AppendAllText(fixture.ConfigPath, $"\n  {name}:\n    local: \"{local.Replace('\\', '/')}\"\n    remote: /my-files/root-{name}\n");
+    }
+
     private static string[] RunLogFiles(string stateDir)
     {
         var logDir = Path.Combine(stateDir, "logs");

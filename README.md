@@ -30,9 +30,12 @@ pdsync trash purge --older-than <days> [--dry-run] [--yes]
 pdsync rebuild <sync> --policy=<p> [--yes] [--dry-run]
 ```
 
-Global options: `--config <path>`, `--sync <name>`, `--json`, `--verbose`,
-`--yes`, `--no-color`, `--fast`, `--full`, `--force`,
-`--cleanup-staged` (run only), `--limit <n>` (listing commands).
+Options: `--config <path>`, `--sync <name>`, `--json`, `--verbose`, `--yes`,
+`--fast`, `--full`, `--force`, `--cleanup-staged` (run only) and
+`--limit <n>` (listing commands) — the same set printed by `--help`. The parser
+also accepts `--no-color` and `--interactive`, neither of which appears in the
+usage banner; conflict prompting is not implemented, so `--interactive` behaves
+as the non-interactive fallback.
 
 Exit codes: `0` success, `1` runtime/CLI failure, `2` blocking conflicts,
 `3` auth, `4` config, `5` lock held, `6` safety guard.

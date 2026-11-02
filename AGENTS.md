@@ -39,6 +39,9 @@ src/PdSync/bin/Debug/net8.0/PdSync.exe doctor --config .\pdsync.yaml
 src/PdSync/bin/Debug/net8.0/PdSync.exe status --config .\pdsync.yaml
 src/PdSync/bin/Debug/net8.0/PdSync.exe ignore path/to/file --config .\pdsync.yaml
 
+# Self-contained single-file exe -> dist/win-x64/PdSync.exe (smoke-tests --help)
+pwsh -NoProfile -File tools/publish.ps1 -Runtime win-x64
+
 # Live smoke test against the real account (creates and cleans a scratch folder)
 pwsh -NoProfile -File tools/live-smoke.ps1
 # Add -KeepRemote to inspect the remote tree after the run.
@@ -128,7 +131,10 @@ tests/PdSync.Tests/          all current tests, including FakeProtonCli E2E
 tools/FakeProtonCli/         deterministic disk-backed fake CLI
 tools/Spikes/                S1-S14 probe harness
 tools/live-smoke.ps1         live real-account smoke test
+tools/publish.ps1            single-file publish (self-contained + portable)
 docs/spikes.md               spike findings and CLI behavior notes
+docs/runbook.md              publish, Task Scheduler, exit codes, operations
+README.md                    entry point; links SPEC, runbook, AGENTS
 SPEC.md                      authoritative design
 ```
 

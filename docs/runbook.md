@@ -213,13 +213,25 @@ Interactive logon of the task account during a run is not required.
 
 ```powershell
 schtasks /create /tn "pdsync nightly" `
-  /tr "\"C:\pdsync\PdSync.exe\" run --config \"C:\pdsync\pdsync.yaml\"" `
+  /tr '"C:\pdsync\PdSync.exe" run --config "C:\pdsync\pdsync.yaml"' `
   /sc daily /st 03:00 `
-  /ru "%USERDOMAIN%\%USERNAME%" /rl LIMITED /f
+  /ru "$env:USERDOMAIN\$env:USERNAME" /rl LIMITED /f
+```
+
+The `/tr` value is a **single-quoted** PowerShell string containing the inner
+double quotes, so `schtasks` receives exactly one argument:
+
+```text
+/tr = "C:\pdsync\PdSync.exe" run --config "C:\pdsync\pdsync.yaml"     (one argv entry)
 ```
 
 Notes:
 
+- `schtasks`-style `\"` escaping and `%USERDOMAIN%` expansion are `cmd.exe`
+  syntax, **not** PowerShell. Pasted into `pwsh` they pass a literal `\` token
+  (splitting `/tr`) and a literal `%USERDOMAIN%`; keep the single-quoted form
+  above. If you deliberately run the command from `cmd.exe`, use `\"` for the
+  inner quotes and `%USERDOMAIN%\%USERNAME%` for the account instead.
 - Without `/rp`, `schtasks` prompts for the account password and creates a
   "run whether user is logged on or not" task.
 - `schtasks` cannot set *Start in*. Either set it once in Task Scheduler
@@ -288,9 +300,16 @@ Details that matter to an operator:
   expired at the start, and can also abort mid-run. A mid-run auth abort does
   not retry, does not commit the failed action, and stops later actions;
   already-committed actions stay committed. The next run reconciles.
-- **Exit 5** means `<stateDir>/locks/<syncId>.lock` is held. pdsync never breaks
-  a stale lock: confirm no `PdSync.exe` process is running, then delete the lock
-  file manually.
+- **Exit 5** means a **live** process holds `<stateDir>/locks/<syncId>.lock`.
+  The message that accompanies it prints the owner recorded in the file
+  (`pid=`, `host=`, `sync=`, `started=`). Wait for that process, or verify the
+  PID on that host; the lock clears when the holder exits. A *leftover* lock
+  file from a finished or crashed run does **not** block `run` — the lock is
+  opened with `FileMode.OpenOrCreate` and is simply re-acquired — so deleting it
+  fixes nothing there. Only `trash purge` treats any existing lock file as an
+  active run and skips that sync (`File.Exists`); once no pdsync process is
+  running, delete the file to unblock purge. Never delete a lock that another
+  process still holds (Windows refuses it anyway).
 - **Exit 6** means `maxDeletes` or `maxDeletePercent` was exceeded, and it is
   checked **before** any deletion. `run --force` bypasses the budget — do not put
   `--force` in a scheduled command.
@@ -385,7 +404,7 @@ documents: C:\Users\me\AppData\Local\pdsync\state\3f2a....sqlite
   run will reconcile before planning — it is not necessarily data loss.
 - `no state DB` means no run has completed yet (or the DB was deleted).
 - `--json` emits `{command, syncs: [{sync, state, pending, runs}]}`.
-- `status` does not accept `--limit`; the window is fixed at 5.
+- `--limit` is accepted but has no effect on `status`; the window is fixed at 5.
 
 ### `history` — "which run failed, and what did it do?"
 
@@ -462,8 +481,10 @@ Daily (every morning):
       and confirm it appears in remote. On day N+1 delete it locally and confirm
       it lands in Proton Trash; or edit it remotely and confirm it is pulled
       down. Record the run id that carried the action.
-- [ ] **Day N: no stranded state.** `status` shows `pending: 0` (a leftover
-      pending row after a completed run means crash recovery did not settle).
+- [ ] **Day N: no stranded state.** `status` prints **no** `pending:` line (it
+      only prints one when the count is non-zero; `status --json` reports
+      `"pending": 0` instead). A printed `pending: N` after a completed run
+      means crash recovery did not settle.
 - [ ] **Day N: lock is not stale.** `<stateDir>/locks/` contains no `.lock` file
       between runs.
 

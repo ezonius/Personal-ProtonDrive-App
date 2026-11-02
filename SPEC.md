@@ -81,7 +81,9 @@ Global flags: `--config <path>`, `--verbose`, `--json`, `--no-color`, `--yes`.
 Per-run flags: `--fast` (incremental remote listing), `--full` (force a complete
 scan, overriding `--fast`), `--force` (override the deletion budget), and
 `--cleanup-staged` (run only: also Proton-Trash adopted/historical staging
-leftovers, §6.2). `plan` accepts the same scan flags so its output matches the
+leftovers, §6.2). `run` prompts for `conflict: ask` only on a TTY without
+`--json`/`--yes` (§5.2); every other case keeps the non-interactive fallback.
+`plan` accepts the same scan flags so its output matches the
 run it predicts; it rejects `--cleanup-staged` (exit 1) so a normal `plan` is
 never a preview of the opt-in cleanup divergence.
 
@@ -89,11 +91,15 @@ never a preview of the opt-in cleanup divergence.
 `--policy=adopt|keep-both|local-wins|remote-wins`; a missing or unknown policy
 is a usage error (exit 1), and `--policy` is rejected on every other command.
 The policy overrides `initialSync` for this operation only and is applied
-through the normal planner initial-adoption path. Rebuild takes the per-sync run
-lock **before** any remote listing (held → exit 5, no remote call), builds the
-preview, and exits 2 with the blocking-conflict list before any backup or state
-replacement when the plan cannot execute. Otherwise it backs up the existing raw
-DB file to
+through the normal planner initial-adoption path. Rebuild builds its preview
+from lock-free read-only snapshots first, so a refusal writes nothing, and exits
+2 with the blocking-conflict list before any backup or state replacement when
+the plan cannot execute. Only after the preview is approved (`--yes` or the TTY
+prompt) does it take the per-sync run lock; a held lock exits 5 before any
+backup or state replacement (the single lock-free preview listing has already
+run). Under the lock it re-lists and re-plans before destroying anything, exits
+2 again if that plan has blocking conflicts, and only then backs up the existing
+raw DB file to
 `<stateDir>/state/backups/<syncId>.pre-rebuild-<UTC yyyyMMdd-HHmmss>.sqlite`
 when one exists (the backups directory is created only for an actual backup),
 then removes the DB so the run starts from an empty baseline. A missing DB
@@ -102,11 +108,14 @@ replaced, which is the recovery path for this command. The planned summary is
 printed before any state change: without `--yes`, a non-interactive invocation
 exits 1 with `rebuild requires --yes when not interactive`, and a TTY prompt
 (`Rebuild state for <sync> with policy <p>? [y/N]`) treats anything but `y`/`yes`
-as refusal (exit 1, no state change). Preview/refusal/lock-held paths write
-nothing under `state/`, including no migration-style `state/backup-*.sqlite`.
-`--dry-run` prints the same summary from an in-memory empty baseline (it never
-opens the old DB or triggers migration/backup), takes no lock, writes no
-backup/state, and makes no Proton call beyond read-only listing. Success exits 0
+as refusal (exit 1, no state change). Preview, refusal, and `--dry-run` paths
+write nothing at all: on a virgin state dir they leave no `<stateDir>/state/`,
+no `<stateDir>/locks/`, and no migration-style `state/backup-*.sqlite`. The
+lock-held path leaves the existing lock directory and lock file untouched and
+writes no backup or state. `--dry-run` prints the same summary from an in-memory
+empty baseline (it never opens the old DB or triggers migration/backup), takes
+no lock, writes no backup/state, and makes no Proton call beyond read-only
+listing. Success exits 0
 and reports recorded/uploaded/downloaded/conflict-renamed counts; blocking
 conflicts exit 2 and runtime or partial failures exit 1.
 
@@ -524,7 +533,7 @@ Policy (`conflict:`) applies to both-changed files:
 | `local-wins` | Upload local as the new revision of the remote file. Remote's previous revision remains in history (Proton keeps revisions); the current remote content is overwritten. |
 | `remote-wins` | Download remote over local; the replaced local file is moved to local trash first. |
 | `newer-wins` **(default)** | Compare local mtime vs remote `claimedModificationTime`. If the difference is ≤ `mtimeToleranceMs`, or either timestamp is in the future by more than the tolerance, fall back to `keep-both`. Otherwise the newer side wins: upload for local, download for remote. The decision and both timestamps are written to the run report. |
-| `ask` | Print a diff summary and prompt (only in a TTY). Non-interactive runs downgrade to `keep-both` and exit 2. |
+| `ask` | In a TTY `run` (no `--json`/`--yes`), prompt once per both-modified file with a compact summary and `[l]ocal wins` / `[r]emote wins` / `[b]oth` / `[s]kip` / `[a]bort`. `l`/`r`/`b` apply that resolution; `s` defers the path (no action, listed as skipped); `a`, an empty line, unknown input, or EOF aborts this and all remaining conflicts. Non-interactive `run`s, `--json`, and `--yes` fall back to `keep-both` and exit 2; `plan` stays read-only and reports the keep-both plan without executing. |
 
 `newer-wins` is a heuristic, not a truth: `claimedModificationTime` is supplied
 by whichever client uploaded the revision, so clocks can disagree. The tolerance
@@ -536,8 +545,15 @@ Delete-vs-modify is always resolved **in favor of the surviving content**, with 
 warning, regardless of policy: never destroy a modification because the other
 side deleted a file.
 
-`conflict: ask` never blocks a scheduled run: without a TTY it behaves as
-`keep-both` and returns exit 2.
+`conflict: ask` never blocks a scheduled run: a `run` without a TTY behaves as
+`keep-both` and returns exit 2. The prompt is used only when the command is
+`run`, the sync policy is `ask`, the plan has both-modified abort conflicts,
+stdin is a TTY, and neither `--json` nor `--yes` was given. A run where every
+conflict received `l`, `r`, or `b` and every action succeeded exits 0; a run
+with any deferred (`s`) or still-aborting path exits 2. Deferred paths are
+listed as `deferred this run` in human output and in the run JSON `deferred`
+array, and a run that only deferred paths is recorded in `history` with status
+`conflict` so the recorded status matches the exit code.
 
 ### 5.3 Initial adoption (B is absent, both sides exist)
 

@@ -21,6 +21,7 @@ public sealed class PreparedSync : IDisposable
         LocalScan local,
         RemoteSnapshot remote,
         PlanResult plan,
+        PlanContext context,
         bool usedFastListing,
         int runsSinceFull)
     {
@@ -32,6 +33,7 @@ public sealed class PreparedSync : IDisposable
         Local = local;
         Remote = remote;
         Plan = plan;
+        Context = context;
         UsedFastListing = usedFastListing;
         RunsSinceFull = runsSinceFull;
     }
@@ -43,11 +45,29 @@ public sealed class PreparedSync : IDisposable
     public IReadOnlyList<EntryRecord> Baseline { get; }
     public LocalScan Local { get; }
     public RemoteSnapshot Remote { get; }
-    public PlanResult Plan { get; }
+    public PlanResult Plan { get; private set; }
+    internal PlanContext Context { get; }
     public bool UsedFastListing { get; }
     public int RunsSinceFull { get; }
 
+    /// <summary>
+    /// Replaces the plan after the CLI has collected interactive conflict
+    /// choices. Only the pure planner is rerun; snapshots and state are the
+    /// already-prepared ones, so no second remote listing happens.
+    /// </summary>
+    internal void ApplyPlan(PlanResult plan) => Plan = plan;
+
     public void Dispose() => State.Dispose();
+
+    /// <summary>
+    /// Replaces the (read-only, in-memory) state with a writable store while
+    /// keeping the snapshots and plan captured under the run lock. Rebuild uses
+    /// this after the old DB has been backed up and removed, so the writable
+    /// store starts from the empty baseline the plan was computed against.
+    /// </summary>
+    internal PreparedSync WithState(StateStore state) =>
+        new(Config, Sync, Cli, state, Baseline, Local, Remote, Plan, Context,
+            UsedFastListing, RunsSinceFull);
 }
 
 public sealed record SyncAttempt(
@@ -91,6 +111,20 @@ public static class SyncService
             baselineOverride: Array.Empty<EntryRecord>(), emptyState: true);
     }
 
+    /// <summary>
+    /// Opens a writable state store for an under-lock rebuild whose snapshots
+    /// and plan were already captured by <see cref="PrepareForRebuildPreview"/>.
+    /// The caller must have backed up and removed the old DB first, so the new
+    /// store starts from an empty baseline. No second remote listing occurs.
+    /// </summary>
+    public static PreparedSync PrepareForRebuildExecution(
+        PdsyncConfig config,
+        SyncConfig sync,
+        PreparedSync prepared)
+    {
+        return prepared.WithState(StateStore.Open(config, sync));
+    }
+
     public static SyncAttempt Run(
         PdsyncConfig config,
         SyncConfig sync,
@@ -101,11 +135,32 @@ public static class SyncService
         bool verbose,
         TextWriter output,
         bool cleanupStaged,
-        TextWriter? diagnostics = null)
+        TextWriter? diagnostics = null,
+        ConflictResolver? conflictResolver = null)
     {
-        var diagnosticsWriter = diagnostics ?? output;
         using var prepared = Prepare(config, sync, readOnly: false, fastRequested, fullRequested,
             interactive, cleanupStaged);
+        return RunPrepared(prepared, fastRequested, force, verbose, output, cleanupStaged,
+            diagnostics, conflictResolver);
+    }
+
+    /// <summary>
+    /// Applies a plan that was prepared elsewhere (rebuild prepares it under the
+    /// run lock). The caller owns <paramref name="prepared"/> and must dispose it.
+    /// </summary>
+    public static SyncAttempt RunPrepared(
+        PreparedSync prepared,
+        bool fastRequested,
+        bool force,
+        bool verbose,
+        TextWriter output,
+        bool cleanupStaged,
+        TextWriter? diagnostics = null,
+        ConflictResolver? conflictResolver = null)
+    {
+        var config = prepared.Config;
+        var sync = prepared.Sync;
+        var diagnosticsWriter = diagnostics ?? output;
 
         var pending = prepared.State.LoadPending();
         string? warning = null;
@@ -117,6 +172,26 @@ public static class SyncService
             prepared.State.ClearPending();
             warning = $"cleared {pending.Count} stale pending row(s) from an interrupted run";
             diagnosticsWriter.WriteLine("warning: " + warning);
+        }
+
+        if (prepared.Plan.HasBlockingConflicts && conflictResolver is not null)
+        {
+            // Only both-changed conflicts under `ask` reach this list; kind
+            // mismatches, collisions, and delete-vs-modify never prompt.
+            var promptable = prepared.Plan.Conflicts
+                .Where(c => c.Resolution == PlanResolution.Abort &&
+                            c.Kind == PlanConflictKind.BothModified)
+                .ToList();
+            if (promptable.Count > 0)
+            {
+                var overrides = conflictResolver(promptable);
+                if (overrides.Count > 0)
+                {
+                    var context = prepared.Context with { ConflictOverrides = overrides };
+                    prepared.ApplyPlan(Planner.Plan(
+                        prepared.Baseline, prepared.Local, prepared.Remote, sync, context));
+                }
+            }
         }
 
         SafetyGuard.CheckDeletionBudget(
@@ -148,8 +223,10 @@ public static class SyncService
                 log);
 
             var report = executor.Execute();
+            // A deferred `ask` path is unresolved even though no action failed;
+            // record it as a conflict so history matches the exit code.
             var status = report.Failed == 0
-                ? (prepared.Plan.Conflicts.Count > 0 ? "conflict" : "ok")
+                ? (prepared.Plan.HasUnresolvedConflicts ? "conflict" : "ok")
                 : "partial";
             prepared.State.FinishRun(runId, status, JsonSerializer.Serialize(new
             {
@@ -236,15 +313,11 @@ public static class SyncService
             var remote = RemoteIndex.Build(cli, sync.RemoteRoot,
                 useFast ? baseByKey : null, useFast ? predicate : null);
 
-            var plan = Planner.Plan(
-                baseline,
-                local,
-                remote,
-                sync,
-                new PlanContext(DateTimeOffset.UtcNow, interactive, cleanupStaged));
+            var context = new PlanContext(DateTimeOffset.UtcNow, interactive, cleanupStaged);
+            var plan = Planner.Plan(baseline, local, remote, sync, context);
 
             return new PreparedSync(
-                config, sync, cli, state, baseline, local, remote, plan,
+                config, sync, cli, state, baseline, local, remote, plan, context,
                 usedFastListing: useFast, runsSinceFull);
         }
         catch

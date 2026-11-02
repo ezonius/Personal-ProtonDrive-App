@@ -141,6 +141,121 @@ public sealed class PlannerTests
         });
     }
 
+    private static (EntryRecord Baseline, LocalEntry Local, RemoteEntry Remote) BothChanged() =>
+        (BaselineFile("a.txt", "a", ShaA, "uid-a", "rev-a"),
+         Local("a.txt", "local", Now.AddMinutes(-2).ToUnixTimeMilliseconds()),
+         RemoteFile("a.txt", "uid-a", "rev-b", "remote", ShaB, claimedMtime: Now.AddMinutes(-5)));
+
+    [Fact]
+    public void AskWithLocalOverride_UploadsRevision()
+    {
+        var (b, l, r) = BothChanged();
+        var result = Plan([b], Scan(l), Remote(r),
+            conflict: ConflictPolicy.Ask, interactive: true,
+            overrides: Overrides(PlanResolution.LocalWins));
+
+        result.Actions.Should().ContainSingle()
+            .Which.Kind.Should().Be(PlanActionKind.UploadRevision);
+        result.Conflicts.Should().ContainSingle()
+            .Which.Resolution.Should().Be(PlanResolution.LocalWins);
+        result.HasBlockingConflicts.Should().BeFalse();
+        result.HasDeferredConflicts.Should().BeFalse();
+    }
+
+    [Fact]
+    public void AskWithRemoteOverride_DownloadsReplacement()
+    {
+        var (b, l, r) = BothChanged();
+        var result = Plan([b], Scan(l), Remote(r),
+            conflict: ConflictPolicy.Ask, interactive: true,
+            overrides: Overrides(PlanResolution.RemoteWins));
+
+        result.Actions.Should().ContainSingle()
+            .Which.Kind.Should().Be(PlanActionKind.DownloadReplace);
+        result.Conflicts.Should().ContainSingle()
+            .Which.Resolution.Should().Be(PlanResolution.RemoteWins);
+    }
+
+    [Fact]
+    public void AskWithKeepBothOverride_EmitsKeepBothActions()
+    {
+        var (b, l, r) = BothChanged();
+        var result = Plan([b], Scan(l), Remote(r),
+            conflict: ConflictPolicy.Ask, interactive: true,
+            overrides: Overrides(PlanResolution.KeepBoth));
+
+        result.Conflicts.Should().ContainSingle()
+            .Which.Resolution.Should().Be(PlanResolution.KeepBoth);
+        result.Actions.Select(a => a.Kind).Should().Contain(new[]
+        {
+            PlanActionKind.LocalConflictRename,
+            PlanActionKind.DownloadReplace,
+            PlanActionKind.KeepBothUpload,
+        });
+    }
+
+    [Fact]
+    public void AskWithDeferOverride_SkipsWithoutActionAndIsNotBlocking()
+    {
+        var (b, l, r) = BothChanged();
+        var result = Plan([b], Scan(l), Remote(r),
+            conflict: ConflictPolicy.Ask, interactive: true,
+            overrides: Overrides(PlanResolution.Defer));
+
+        result.Actions.Should().BeEmpty();
+        result.Conflicts.Should().BeEmpty();
+        result.Skipped.Should().ContainSingle()
+            .Which.Reason.Should().Be(PlanSkipReason.Deferred);
+        result.HasBlockingConflicts.Should().BeFalse();
+        result.HasDeferredConflicts.Should().BeTrue();
+    }
+
+    [Fact]
+    public void AskWithUnknownOverrideKeyStaysBlocking()
+    {
+        var (b, l, r) = BothChanged();
+        var result = Plan([b], Scan(l), Remote(r),
+            conflict: ConflictPolicy.Ask, interactive: true,
+            overrides: Overrides(PlanResolution.LocalWins, key: "other.txt"));
+
+        result.Conflicts.Should().ContainSingle()
+            .Which.Resolution.Should().Be(PlanResolution.Abort);
+        result.HasBlockingConflicts.Should().BeTrue();
+    }
+
+    [Fact]
+    public void OverridesDoNotAffectNonAskPolicies()
+    {
+        var (b, l, r) = BothChanged();
+        var result = Plan([b], Scan(l), Remote(r),
+            conflict: ConflictPolicy.RemoteWins,
+            overrides: Overrides(PlanResolution.LocalWins));
+
+        result.Actions.Should().ContainSingle()
+            .Which.Kind.Should().Be(PlanActionKind.DownloadReplace);
+        result.Conflicts.Should().ContainSingle()
+            .Which.Resolution.Should().Be(PlanResolution.RemoteWins);
+    }
+
+    [Fact]
+    public void AskNonInteractive_KeepsBothButRemainsUnresolved()
+    {
+        var (b, l, r) = BothChanged();
+        var result = Plan([b], Scan(l), Remote(r), conflict: ConflictPolicy.Ask);
+
+        result.Conflicts.Should().ContainSingle()
+            .Which.Resolution.Should().Be(PlanResolution.KeepBoth);
+        result.HasAskFallback.Should().BeTrue();
+        result.HasUnresolvedConflicts.Should().BeTrue();
+    }
+
+    private static IReadOnlyDictionary<string, PlanResolution> Overrides(
+        PlanResolution resolution, string key = "a.txt") =>
+        new Dictionary<string, PlanResolution>(StringComparer.Ordinal)
+        {
+            [PathKey.Fold(key)] = resolution,
+        };
+
     [Fact]
     public void LocalDeleteWithUnchangedRemote_TrashesRemote()
     {
@@ -539,11 +654,16 @@ public sealed class PlannerTests
         LocalScan local,
         RemoteSnapshot remote,
         Func<ResolvedOptions, ResolvedOptions>? configure = null,
-        bool cleanupStaged = false)
+        bool cleanupStaged = false,
+        ConflictPolicy? conflict = null,
+        bool interactive = false,
+        IReadOnlyDictionary<string, PlanResolution>? overrides = null)
     {
         var options = Options();
         if (configure is not null)
             options = configure(options);
+        if (conflict is not null)
+            options = options with { Conflict = conflict.Value };
 
         var sync = new SyncConfig(
             "test",
@@ -555,7 +675,7 @@ public sealed class PlannerTests
             options);
 
         return Planner.Plan(baseEntries, local, remote, sync,
-            new PlanContext(Now, CleanupStaged: cleanupStaged));
+            new PlanContext(Now, interactive, cleanupStaged, overrides));
     }
 
     private static ResolvedOptions Options() => new(

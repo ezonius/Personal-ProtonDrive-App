@@ -184,6 +184,163 @@ public sealed class CliFakeTests
         fixture.RemoteFileNames().Should().HaveCount(2);
     }
 
+    private static Fixture BothModified()
+    {
+        var fixture = new Fixture(defaults: "conflict: ask");
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "base");
+        fixture.WriteLocal("a.txt", "base");
+        var initial = fixture.Cli("run");
+        initial.ExitCode.Should().Be(0, initial.Stderr);
+
+        fixture.WriteLocal("a.txt", "local-content");
+        var remoteSource = fixture.Temp.Combine("remote-source", "a.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(remoteSource)!);
+        File.WriteAllText(remoteSource, "remote-content");
+        fixture.Fake("fs", "upload", "--json", "--file-conflict-strategy", "create-new-revision",
+            remoteSource, "/my-files/root");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
+        return fixture;
+    }
+
+    [Fact]
+    public void Run_AskInteractiveLocalChoice_UploadsAndExitsZero()
+    {
+        using var fixture = BothModified();
+        var promptedListsBefore = fixture.InvocationCount("list");
+
+        var result = fixture.CliWithStdin("l\n", isTty: true, "run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("conflict a.txt");
+        result.Stdout.Should().Contain("digests: differ");
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("local-content");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("local-content");
+        // The prompted re-plan reuses the prepared snapshots. A non-interactive
+        // keep-both run on an identical fixture performs the same single
+        // prepare, so the prompted run must not list any more often.
+        using var baseline = BothModified();
+        var baselineListsBefore = baseline.InvocationCount("list");
+        baseline.CliWithStdin("", isTty: false, "run").ExitCode.Should().Be(2);
+        var baselineListingDelta = baseline.InvocationCount("list") - baselineListsBefore;
+        var promptedListingDelta = fixture.InvocationCount("list") - promptedListsBefore;
+        baselineListingDelta.Should().BeGreaterThan(0);
+        promptedListingDelta.Should().Be(baselineListingDelta);
+    }
+
+    [Fact]
+    public void Run_AskInteractiveRemoteChoice_DownloadsAndExitsZero()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("r\n", isTty: true, "run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        // The prompt only exists on the interactive override path; the
+        // non-interactive base falls back to keep-both without it.
+        result.Stdout.Should().Contain("conflict a.txt");
+        result.Stdout.Should().Contain("[r]emote wins");
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote-content");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
+    }
+
+    [Fact]
+    public void Run_AskInteractiveBothChoice_KeepsBothSides()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("b\n", isTty: true, "run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("conflict a.txt");
+        result.Stdout.Should().Contain("[b]oth");
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("remote-content");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().HaveCount(2);
+        fixture.RemoteFileNames().Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void Run_AskInteractiveSkip_LeavesBothSidesUntouchedAndExitsTwo()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("s\n", isTty: true, "run");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("local-content");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().ContainSingle();
+        fixture.InvocationCount("upload").Should().Be(1); // the setup upload only
+        result.Stdout.Should().Contain("conflict a.txt");
+        result.Stdout.Should().Contain("deferred this run a.txt");
+
+        var history = fixture.Cli("history", "--json");
+        using var document = JsonDocument.Parse(history.Stdout);
+        document.RootElement.GetProperty("syncs")[0].GetProperty("runs")[0]
+            .GetProperty("status").GetString().Should().Be("conflict");
+    }
+
+    [Theory]
+    [InlineData("a\n")]
+    [InlineData("\n")]
+    [InlineData("wat\n")]
+    [InlineData("")]
+    public void Run_AskInteractiveAbortOrInvalid_AbortsAndExitsTwo(string input)
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin(input, isTty: true, "run");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("aborted [BothModified] a.txt");
+        File.ReadAllText(fixture.LocalFull("a.txt")).Should().Be("local-content");
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("remote-content");
+        fixture.InvocationCount("upload").Should().Be(1);
+    }
+
+    [Fact]
+    public void Run_AskNonTty_FallsBackToKeepBothWithoutPrompting()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("l\n", isTty: false, "run");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().NotContain("[l]ocal wins");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().HaveCount(2);
+        fixture.RemoteFileNames().Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void Run_AskWithYes_DoesNotPromptAndKeepsBoth()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("l\n", isTty: true, "run", "--yes");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().NotContain("[l]ocal wins");
+        Directory.GetFiles(fixture.Local, "a*.txt").Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void Run_AskJson_DoesNotPromptAndKeepsJsonClean()
+    {
+        using var fixture = BothModified();
+
+        var result = fixture.CliWithStdin("l\n", isTty: true, "run", "--json");
+
+        result.ExitCode.Should().Be(2, result.Stdout + result.Stderr);
+        result.Stdout.Should().NotContain("conflict a.txt");
+        result.Stdout.Should().NotContain("[l]ocal wins");
+        using var document = JsonDocument.Parse(result.Stdout);
+        document.RootElement.GetProperty("exitCode").GetInt32().Should().Be(2);
+        document.RootElement.GetProperty("syncs")[0].GetProperty("conflicts")[0]
+            .GetProperty("resolution").GetString().Should().Be("keepBoth");
+        document.RootElement.GetProperty("syncs")[0].GetProperty("deferred")
+            .GetArrayLength().Should().Be(0);
+    }
+
     [Fact]
     public void FailedUpload_IsNotCommittedToState()
     {
@@ -1582,7 +1739,7 @@ public sealed class CliFakeTests
     }
 
     [Fact]
-    public void Rebuild_LockHeld_ReturnsExit5WithoutWritingOrListing()
+    public void Rebuild_LockHeld_ReturnsExit5WithoutWritingAfterPreview()
     {
         using var fixture = new Fixture();
         fixture.SeedRoot();
@@ -1592,15 +1749,77 @@ public sealed class CliFakeTests
         var listings = fixture.InvocationCount("list");
         var before = File.ReadAllBytes(fixture.DbPath());
         using var held = PdSync.Exec.RunLock.Acquire(fixture.Config, fixture.Config.Syncs.Single());
+        var lockDirectory = Path.Combine(fixture.StateDir, "locks");
+        var lockFilesBefore = fixture.StateTreeEntries();
+        var lockPath = Directory.GetFiles(lockDirectory).Single();
+        var lockLength = new FileInfo(lockPath).Length;
 
         var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--yes");
 
         result.ExitCode.Should().Be(5, result.Stdout + result.Stderr);
         result.Stderr.Should().Contain("lock");
-        fixture.InvocationCount("list").Should().Be(listings, "the lock must precede all remote work");
+        fixture.InvocationCount("list").Should().Be(
+            listings + 1, "only the lock-free preview lists before the held lock is detected");
         File.ReadAllBytes(fixture.DbPath()).Should().Equal(before);
         fixture.LegacyStateBackups().Should().BeEmpty();
         fixture.RebuildBackupFiles().Should().BeEmpty();
+        fixture.StateTreeEntries().Should().Equal(lockFilesBefore);
+        Directory.GetFiles(lockDirectory).Should().Equal(new[] { lockPath });
+        new FileInfo(lockPath).Length.Should().Be(lockLength);
+    }
+
+    [Fact]
+    public void Rebuild_VirginState_NonInteractiveRefusal_WritesNoStateTree()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+
+        var result = fixture.CliWithInput(string.Empty, "rebuild", "docs", "--policy", "adopt");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("rebuild requires --yes when not interactive");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        fixture.StateTreeEntries().Should().BeEmpty("a refusal must not create state/ at all");
+        fixture.StateDirEntries().Should().BeEmpty("a refusal must not create state/ or locks/");
+        fixture.InvocationCount("upload").Should().Be(0);
+        fixture.InvocationCount("download").Should().Be(0);
+    }
+
+    [Fact]
+    public void Rebuild_VirginState_TtyRefusal_WritesNoStateTree()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+
+        var result = fixture.CliWithStdin("n\n", isTty: true,
+            "rebuild", "docs", "--policy", "adopt");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("rebuild cancelled");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        fixture.StateTreeEntries().Should().BeEmpty("a refusal must not create state/ at all");
+        fixture.StateDirEntries().Should().BeEmpty("a refusal must not create state/ or locks/");
+    }
+
+    [Fact]
+    public void Rebuild_VirginState_DryRun_WritesNoStateTree()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.SeedFile("a.txt", "same");
+        fixture.WriteLocal("a.txt", "same");
+
+        var result = fixture.Cli("rebuild", "docs", "--policy", "adopt", "--dry-run");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("rebuild docs (dry-run)");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        fixture.StateTreeEntries().Should().BeEmpty("a dry-run must not create state/ at all");
+        fixture.StateDirEntries().Should().BeEmpty("a dry-run must not create state/ or locks/");
     }
 
     [Fact]
@@ -1907,6 +2126,29 @@ public sealed class CliFakeTests
             var stderr = new StringWriter();
             var exit = CliApp.Run(all, stdout, stderr, detector);
             return new CliResult(exit, stdout.ToString(), stderr.ToString());
+        }
+
+        /// <summary>Every path under the configured stateDir, relative to it.</summary>
+        public IReadOnlyList<string> StateDirEntries()
+        {
+            return Directory.Exists(StateDir)
+                ? Directory.GetFileSystemEntries(StateDir, "*", SearchOption.AllDirectories)
+                    .Select(path => Path.GetRelativePath(StateDir, path))
+                    .OrderBy(path => path, StringComparer.Ordinal)
+                    .ToList()
+                : Array.Empty<string>();
+        }
+
+        /// <summary>Every path under stateDir/state, relative to stateDir.</summary>
+        public IReadOnlyList<string> StateTreeEntries()
+        {
+            var directory = Path.Combine(StateDir, "state");
+            return Directory.Exists(directory)
+                ? Directory.GetFileSystemEntries(directory, "*", SearchOption.AllDirectories)
+                    .Select(path => Path.GetRelativePath(StateDir, path))
+                    .OrderBy(path => path, StringComparer.Ordinal)
+                    .ToList()
+                : Array.Empty<string>();
         }
 
         public string DbPath() => Path.Combine(

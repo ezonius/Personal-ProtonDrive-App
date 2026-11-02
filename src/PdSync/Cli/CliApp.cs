@@ -377,8 +377,11 @@ public static class CliApp
             // explicit run --cleanup-staged opt-in; doctor only reports them.
             try
             {
-                using var baselineState = StateStore.OpenReadOnly(config, sync);
+                // Config errors must win over state findings: load the ignore
+                // file before opening state so a malformed .pdignore always
+                // exits 4, even when the schema is not current.
                 var ignoreRules = IgnoreRules.Load(sync);
+                using var baselineState = StateStore.OpenReadOnly(config, sync);
                 // Frozen and ignored baseline entries are not actionable by
                 // run --cleanup-staged (those skips run before the opt-in
                 // branch), so they are excluded from the report. Local
@@ -416,12 +419,18 @@ public static class CliApp
                 // mapping plan/run/ignore use. Do not turn it into a FAIL check.
                 throw;
             }
-            catch (StateSchemaMismatchException ex)
+            catch (StateSchemaMismatchException)
             {
-                // doctor is read-only toward state: an older schema is a
-                // warning, never a migration and never a failure.
-                checks.Add(new DoctorCheck($"sync {sync.Name} staged leftovers", true, ex.Message,
-                    Warning: true));
+                // The state probe below owns the single schema warning for this
+                // sync. Skip this probe quietly instead of duplicating it.
+                checks.Add(new DoctorCheck($"sync {sync.Name} staged leftovers", true,
+                    "skipped: state schema not current"));
+            }
+            catch (StateSchemaTooNewException)
+            {
+                // Newer schemas are a failure, reported once by the state probe.
+                checks.Add(new DoctorCheck($"sync {sync.Name} staged leftovers", true,
+                    "skipped: state schema is newer than this build"));
             }
             catch (Exception ex)
             {

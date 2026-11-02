@@ -96,9 +96,11 @@ Spawn and auth failures keep their existing mapping (auth 3, other CLI failure
 `doctor` is read-only toward state: it never creates, migrates, backs up, or
 writes the state DB or fast-counter files, and it takes no run lock. An existing
 DB with an older schema is reported as a `warn` check and exit stays 0 when that
-is the only finding; a structurally broken DB remains a `FAIL` check (exit 1).
-A malformed `.pdignore` is a config error (exit 4) in `doctor`, exactly as it is
-for `plan`, `run`, and `ignore`.
+is the only finding; a DB written by a newer schema remains a `FAIL` check
+(exit 1) with an `upgrade pdsync` remedy, and a structurally broken DB remains a
+`FAIL` check (exit 1). A malformed `.pdignore` is a config error (exit 4) in
+`doctor`, exactly as it is for `plan`, `run`, and `ignore`, and it is detected
+before any state probe so config errors always win.
 
 `init` creates a config and a default `.pdignore`. It resolves the config
 location with the same order as loading: `--config` or `PDSYNC_CONFIG` always
@@ -809,10 +811,13 @@ mapping's `Local.RootFolderPath` with every configured sync `local` root.
   crashes and only reads files.
 - `doctor` is read-only toward state: the state-DB check opens the baseline
   read-only and never creates, migrates, backs up, or writes a database (§7).
-  An older schema is reported as a `warn sync <name> state` check with its
-  message and does not fail `doctor`; a corrupt or unreadable database remains a
+  An older schema is reported once per sync as a `warn sync <name> state` check
+  with its message and does not fail `doctor`; the staged-leftover probe skips
+  quietly. A DB written by a newer schema remains a `FAIL` (exit 1) with an
+  `upgrade pdsync` remedy, and a corrupt or unreadable database also remains a
   `FAIL` (exit 1). A malformed `.pdignore` is a config error (exit 4), not a
-  failing check. The mapping probe and the staged-leftover probe do not write:
+  failing check, and it is loaded before the state probe so it always wins. The
+  mapping probe and the staged-leftover probe do not write:
   the latter opens the baseline read-only and performs one complete remote
   listing. It reports every
   unfrozen, non-ignored, grammar-matching remote file already present in the
@@ -855,8 +860,9 @@ Rules:
 - The DB is the **only** source of truth for "what was synced last time".
 - `plan` opens the DB read-only. If it does not exist yet, `plan` uses an
   in-memory empty baseline; it never creates, migrates, or backs up a file.
-  `doctor` also opens it read-only and warns when the schema is not current
-  instead of migrating. Schema migration happens only in `run`, after copying
+  `doctor` also opens it read-only and warns when the schema is older than
+  this build instead of migrating; a newer schema stays a failure there and in
+  `plan` (upgrade pdsync). Schema migration happens only in `run`, after copying
   the DB to `state/backup-<date>.sqlite`.
 - Every destructive or transfer action is preceded by a `pending` row and
   followed by a state update in the same transaction where possible.

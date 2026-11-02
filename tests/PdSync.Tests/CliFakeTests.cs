@@ -641,9 +641,93 @@ public sealed class CliFakeTests
 
         result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
         result.Stdout.Should().Contain("warn sync docs state: State database schema v0 is not current (v1); run pdsync run to migrate it");
+        result.Stdout.Should().Contain("sync docs staged leftovers: skipped: state schema not current");
+        result.Stdout.Split('\n').Count(line => line.StartsWith("warn ", StringComparison.Ordinal))
+            .Should().Be(1, "one warning per sync, not one per probe");
         result.Stdout.Should().NotContain("doctor: problems found");
         SHA256.HashData(File.ReadAllBytes(dbPath)).Should().Equal(hashBefore);
         File.GetLastWriteTimeUtc(dbPath).Should().Be(mtimeBefore);
+    }
+
+    [Fact]
+    public void Doctor_NewerSchemaStaysAFailure()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        using (StateStore.Open(fixture.Config, fixture.Config.Syncs.Single()))
+        {
+        }
+
+        var dbPath = Directory.GetFiles(Path.Combine(fixture.StateDir, "state"), "*.sqlite").Single();
+        using (var connection = new SqliteConnection($"Data Source={dbPath};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA user_version = 2;";
+            command.ExecuteNonQuery();
+        }
+
+        var doctor = fixture.Cli("doctor");
+
+        doctor.ExitCode.Should().Be(1, doctor.Stdout + doctor.Stderr);
+        doctor.Stdout.Should().Contain(
+            "FAIL sync docs state: State database schema v2 is newer than this build (v1); upgrade pdsync.");
+        doctor.Stdout.Should().NotContain("run pdsync run to migrate it");
+        doctor.Stdout.Should().Contain("doctor: problems found");
+
+        var plan = fixture.Cli("plan");
+
+        plan.ExitCode.Should().NotBe(0, plan.Stdout + plan.Stderr);
+        plan.Stderr.Should().Contain("State database schema v2 is newer than this build (v1)");
+        plan.Stderr.Should().Contain("upgrade pdsync");
+    }
+
+    [Fact]
+    public void Doctor_MalformedIgnoreWinsOverOldSchema()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        using (StateStore.Open(fixture.Config, fixture.Config.Syncs.Single()))
+        {
+        }
+
+        var dbPath = Directory.GetFiles(Path.Combine(fixture.StateDir, "state"), "*.sqlite").Single();
+        using (var connection = new SqliteConnection($"Data Source={dbPath};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA user_version = 0;";
+            command.ExecuteNonQuery();
+        }
+
+        fixture.WriteLocal(".pdignore", "foo[\n");
+
+        var result = fixture.Cli("doctor");
+
+        result.ExitCode.Should().Be(4, result.Stdout + result.Stderr);
+        result.Stdout.Should().BeEmpty();
+        result.Stderr.Should().StartWith("config:");
+        result.Stderr.Should().Contain("invalid ignore pattern 'foo['");
+    }
+
+    [Fact]
+    public void Doctor_WithoutStateDirectoryCreatesNothing()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        var before = Directory.GetFileSystemEntries(fixture.StateDir)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+
+        var result = fixture.Cli("doctor");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        Directory.GetFileSystemEntries(fixture.StateDir)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .Should().Equal(before);
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        Directory.Exists(Path.Combine(fixture.StateDir, "logs")).Should().BeFalse();
+        Directory.Exists(Path.Combine(fixture.StateDir, "locks")).Should().BeFalse();
     }
 
     [Fact]

@@ -59,13 +59,26 @@ public class StateException : Exception
 
 /// <summary>
 /// Raised by the read-only schema check when an existing database was written
-/// by a different schema version. Only <see cref="StateStore.OpenReadOnly"/> uses
+/// by an older schema version. Only <see cref="StateStore.OpenReadOnly"/> uses
 /// this; a writable open migrates instead. Callers that must not write state
 /// (for example <c>doctor</c>) can report it as a warning rather than a failure.
 /// </summary>
 public sealed class StateSchemaMismatchException : StateException
 {
     public StateSchemaMismatchException(string message)
+        : base(message)
+    {
+    }
+}
+
+/// <summary>
+/// Raised when an existing database was written by a newer schema than this
+/// build understands. This is not a migratable mismatch: upgrading pdsync is
+/// the only remedy, so callers must keep treating it as a failure.
+/// </summary>
+public sealed class StateSchemaTooNewException : StateException
+{
+    public StateSchemaTooNewException(string message)
         : base(message)
     {
     }
@@ -170,7 +183,12 @@ public sealed class StateStore : IDisposable
             if (readOnly && existed)
             {
                 var version = ReadUserVersion(connection);
-                if (version != SchemaVersion)
+                if (version > SchemaVersion)
+                {
+                    throw new StateSchemaTooNewException(NewerSchemaMessage(version));
+                }
+
+                if (version < SchemaVersion)
                 {
                     throw new StateSchemaMismatchException(
                         $"State database schema v{version} is not current (v{SchemaVersion}); " +
@@ -527,7 +545,7 @@ public sealed class StateStore : IDisposable
     {
         var version = ReadUserVersion(connection);
         if (version > SchemaVersion)
-            throw new StateException($"State database schema v{version} is newer than this build (v{SchemaVersion}).");
+            throw new StateSchemaTooNewException(NewerSchemaMessage(version));
 
         if (version == SchemaVersion)
             return;
@@ -546,6 +564,9 @@ public sealed class StateStore : IDisposable
 
         throw new StateException($"No migration path from schema v{version} to v{SchemaVersion}.");
     }
+
+    private static string NewerSchemaMessage(int version) =>
+        $"State database schema v{version} is newer than this build (v{SchemaVersion}); upgrade pdsync.";
 
     private static void CreateSchemaV1(SqliteConnection connection, SqliteTransaction transaction)
     {

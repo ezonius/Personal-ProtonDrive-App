@@ -483,7 +483,11 @@ table (§5).
 
 The live smoke (`tools/live-smoke.ps1`) is the fast companion check for this
 procedure. It also exercises a `keep-both` conflict, including a near-limit
-240-character stem whose conflict name is truncated to 255 characters. On the
+240-character stem whose conflict name is truncated to 255 characters.
+**Prerequisite:** the conflict step is on by default and needs Windows long-path
+support, because the 240-character stem pushes the local/verify path past
+MAX_PATH. If the step fails with a path-length error, treat it as an environment
+problem rather than a pdsync regression, or pass `-SkipConflict`. On the
 live account this step added ~3 min to an ~8 min run: it seeds and transfers
 two conflicts, uploads two remote edits, downloads two originals, uploads two
 conflict copies, and downloads both copies back to verify their contents. The

@@ -242,7 +242,7 @@ parallelism is otherwise disabled in the assembly/test setup.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 
 Prefer behavior assertions over implementation details. The current suite is
-**424 tests**.
+**465 tests**.
 
 ---
 
@@ -258,7 +258,11 @@ Prefer behavior assertions over implementation details. The current suite is
     gitignored);
   - exercises initial push, no-op convergence, local edit, remote-origin pull,
     remote delete → local trash, local delete → Proton Trash, ignored files,
-    and fast/full mode;
+    fast/full mode, and a `keep-both` conflict (including a 240-character stem
+    that must truncate to a 255-character conflict name);
+  - needs Windows long-path support for the default run: the 240-character
+    stem pushes the local/verify path past MAX_PATH. An environmental failure
+    there is not a pdsync regression. Use `-SkipConflict` to skip that step;
   - trashes and permanently deletes the scratch remote root on success unless
     `-KeepRemote` is passed.
 - If a live run fails, leave the scratch root and inspect

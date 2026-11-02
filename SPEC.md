@@ -798,7 +798,8 @@ Notes:
   (`--cleanup-staged`, `TryTrashUploadedNode`) and empty-folder pruning also use
   Proton Trash but are deliberately **not** recorded and are not undoable.
   Restore refuses with exit 2 while the path is active again in the sync; the
-  stale record can be dropped locally with `trash restore --forget <path>`.
+  stale record can be dropped locally with
+  `trash restore --forget <sync> <path>`.
 - Pass `--json` to every command. Upload JSON is only a counter:
   `{transferredItems, transferredBytes, skippedItems, failedItems, failures[]}` —
   it carries no revision or hash, so verification comes from a parent listing.

@@ -2590,7 +2590,7 @@ public sealed class CliFakeTests
 
         restore.ExitCode.Should().Be(2, restore.Stdout + restore.Stderr);
         restore.Stderr.Should().Contain("active again");
-        restore.Stderr.Should().Contain("--forget a.txt");
+        restore.Stderr.Should().Contain("--forget <sync> a.txt");
         fixture.IsUidTrashed(trashedUid).Should().BeTrue();
 
         var restoresBefore = fixture.InvocationCount("restore");

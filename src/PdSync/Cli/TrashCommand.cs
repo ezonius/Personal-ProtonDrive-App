@@ -299,7 +299,7 @@ public static class TrashCommand
             {
                 results.Add(new RestorePathResult(path, "active",
                     $"path is active again in the sync; refusing to restore the old trashed node " +
-                    $"(clear the record with: pdsync trash restore --forget {path})",
+                    $"(clear the record with: pdsync trash restore --forget <sync> {path})",
                     null));
                 exit = Math.Max(exit, 2);
                 continue;

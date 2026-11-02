@@ -285,7 +285,7 @@ task, `0` is success; every other value is a signal you should look at.
 |---|---|---|---|
 | 0 | Success, including "nothing to do" | Healthy | None |
 | 1 | Runtime/CLI failure | Something failed for at least one sync | Read the JSONL log and stderr; fix and rerun |
-| 2 | Unresolved conflicts (`run` completed the safe subset) | Data is safe but the tree is not fully converged | Run `status`/`plan`, resolve or choose a policy, rerun |
+| 2 | Unresolved conflicts (a blocking conflict aborts before any action; the `ask` fallback and deferred paths commit the safe subset) | Data is safe but the tree is not fully converged | Run `status`/`plan`, resolve or choose a policy, rerun |
 | 3 | Authentication required or expired | Nothing ran; session gone | Log in as the task account, then rerun |
 | 4 | Config/schema error | The task will keep failing until the config is fixed | Fix `pdsync.yaml` / `.pdignore` / paths |
 | 5 | Another run holds the lock | A previous (or overlapping) run is still active | Wait; check `<stateDir>/locks/<syncId>.lock` |
@@ -293,14 +293,15 @@ task, `0` is success; every other value is a signal you should look at.
 
 Details that matter to an operator:
 
-- **Exit 2 is not a crash.** `run` applies every non-conflicting action, commits
-  that subset, and leaves the conflicting paths listed. `plan` exits `2` too
-  when blocking conflicts exist. Exit `2` covers all unresolved cases: blocking
-  conflicts, the non-interactive `ask` keep-both fallback, and paths deferred
-  with `s` at the prompt. Conflicts are resolved by answering the prompt for
-  `conflict: ask`, by editing/keeping a file and rerunning, by setting
-  `defaults.conflict` / per-sync `conflict`, or as a last resort by
-  `rebuild --policy=...`.
+- **Exit 2 is not a crash, but its two paths differ.** A blocking conflict
+  (kind change, case collision, or an abort at the `ask` prompt) aborts the sync
+  before any action and records no run row. The non-interactive `ask` keep-both
+  fallback and paths deferred with `s` at the prompt do apply every
+  non-conflicting action, commit that subset, and leave the conflicting paths
+  listed. `plan` exits `2` too when blocking conflicts exist. Conflicts are
+  resolved by answering the prompt for `conflict: ask`, by editing/keeping a
+  file and rerunning, by setting `defaults.conflict` / per-sync `conflict`, or
+  as a last resort by `rebuild --policy=...`.
 - **Exit 3** is raised before any state change when the session is missing or
   expired at the start, and can also abort mid-run. A mid-run auth abort does
   not retry, does not commit the failed action, and stops later actions;

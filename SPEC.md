@@ -206,7 +206,7 @@ Exit codes:
 |---|---|
 | 0 | Success, including "nothing to do" |
 | 1 | Runtime/CLI failure |
-| 2 | Unresolved conflicts (run completed the safe subset) |
+| 2 | Unresolved conflicts: a blocking conflict aborts the sync before any action and records no run; the non-interactive `ask` keep-both fallback and deferred paths commit the safe subset |
 | 3 | Authentication required or expired |
 | 4 | Config/schema error |
 | 5 | Another run holds the lock |
@@ -931,7 +931,8 @@ Rules:
 - On startup, `pending` rows are reconciled against current L/R (idempotent
   re-check) before planning: adopt if the action clearly landed, retry if not.
 - A run is committed only after all actions succeed (or are explicitly skipped);
-  conflicts still commit the successful subset.
+  conflicts that do not block the plan still commit the successful subset; a
+  blocking conflict aborts before any action and records no run.
 - `pdsync status` surfaces uncommitted `pending` rows from a crashed run.
 - Backups: on schema migration, copy the DB to `state/backup-<date>.sqlite`.
 - `rebuild` copies the raw DB (even a corrupt one) to

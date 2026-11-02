@@ -40,10 +40,10 @@ when no usable prompt exists: it forces the conflict to block (exit 2) instead
 of taking the keep-both fallback. A TTY `run` prompts for `ask` conflicts even
 without the flag; `plan` never prompts, and `--json`/`--yes` never prompt.
 
-Exit codes: `0` success, `1` runtime/CLI failure, `2` unresolved conflicts
-(blocking conflicts, the non-interactive `ask` keep-both fallback, or paths
-deferred to the next run; the safe subset is still applied), `3` auth,
-`4` config, `5` lock held, `6` safety guard.
+Exit codes: `0` success, `1` runtime/CLI failure, `2` unresolved conflicts (a
+blocking conflict aborts the sync before any action and records no run row; the
+non-interactive `ask` keep-both fallback and paths deferred with `s` do commit
+the safe subset), `3` auth, `4` config, `5` lock held, `6` safety guard.
 
 ## Quick start
 

@@ -8,6 +8,9 @@ public sealed class FakeState
     public int SchemaVersion { get; set; } = 1;
     public bool Auth { get; set; } = true;
     public string? Version { get; set; }
+
+    /// <summary>Simulates files whose remote digest was never recorded (imports).</summary>
+    public bool HideDigest { get; set; }
     public int NextId { get; set; } = 1;
     public List<FakeNode> Nodes { get; set; } = new();
     public Dictionary<string, int> RuleHits { get; set; } = new();
@@ -20,6 +23,7 @@ public sealed class FakeNode
     public string Name { get; set; } = "";
     public string Type { get; set; } = "file"; // file | folder
     public string? Sha1 { get; set; }
+    public bool HideDigest { get; set; }
     public long Size { get; set; }
     public DateTime CreatedUtc { get; set; }
     public DateTime ModifiedUtc { get; set; }

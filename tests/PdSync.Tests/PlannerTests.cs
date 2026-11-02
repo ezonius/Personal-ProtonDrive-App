@@ -452,6 +452,50 @@ public sealed class PlannerTests
     }
 
     [Fact]
+    public void KeepBoth_LongAsciiName_TruncatesStemToFitWindowsLimit()
+    {
+        var stem = new string('x', 240);
+        var name = stem + ".txt";
+        var b = BaselineFile(name, "a", ShaA, "uid-a", "rev-a");
+        var result = Plan(
+            [b],
+            Scan(Local(name, "local", Now.AddMinutes(-1).ToUnixTimeMilliseconds())),
+            Remote(RemoteFile(name, "uid-a", "rev-b", "remote", ShaB,
+                claimedMtime: Now.AddMinutes(-1).AddMilliseconds(100))));
+
+        var rename = result.Actions.Single(a => a.Kind == PlanActionKind.LocalConflictRename);
+        var conflictName = rename.SecondaryPath!;
+        conflictName.Length.Should().BeLessThanOrEqualTo(255);
+        conflictName.Should().EndWith(".txt");
+        conflictName.Should().Contain("(conflict ");
+        conflictName.Should().NotBe(name);
+        conflictName.Should().StartWith("xxxx");
+        var suffixLength = conflictName.Length - conflictName.IndexOf(" (conflict ", StringComparison.Ordinal);
+        (conflictName.Length - suffixLength).Should().Be(255 - suffixLength, "the stem is trimmed to exactly fill the leaf limit");
+    }
+
+    [Fact]
+    public void KeepBoth_MultibyteName_RespectsUtf8ByteLimit()
+    {
+        // 120 'é' characters = 240 UTF-8 bytes, so the UTF-8 byte cap binds before
+        // the UTF-16 unit cap.
+        var stem = new string('é', 120);
+        var name = stem + ".txt";
+        var b = BaselineFile(name, "a", ShaA, "uid-a", "rev-a");
+        var result = Plan(
+            [b],
+            Scan(Local(name, "local", Now.AddMinutes(-1).ToUnixTimeMilliseconds())),
+            Remote(RemoteFile(name, "uid-a", "rev-b", "remote", ShaB,
+                claimedMtime: Now.AddMinutes(-1).AddMilliseconds(100))));
+
+        var conflictName = result.Actions.Single(a => a.Kind == PlanActionKind.LocalConflictRename).SecondaryPath!;
+        System.Text.Encoding.UTF8.GetByteCount(conflictName).Should().BeLessThanOrEqualTo(255);
+        conflictName.Length.Should().BeLessThanOrEqualTo(255);
+        conflictName.Should().EndWith(".txt");
+        conflictName.Should().Contain("(conflict ");
+    }
+
+    [Fact]
     public void ConflictPolicyLocalWins_Uploads()
     {
         var b = BaselineFile("a.txt", "a", ShaA, "uid-a", "rev-a");

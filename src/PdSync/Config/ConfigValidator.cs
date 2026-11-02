@@ -251,7 +251,7 @@ public static class ConfigValidator
         List<string> errors)
     {
         var mode = ParseEnum(raw?.Mode, field + ".mode", VerifyMode.Hash, VerifyModeNames, errors);
-        var samplePercent = ParseInt(raw?.SamplePercent, field + ".samplePercent", 5, errors, 0, 100);
+        var samplePercent = ParseInt(raw?.SamplePercent, field + ".samplePercent", 100, errors, 0, 100);
         var minSizeMb = ParseInt(raw?.MinSizeMb, field + ".minSizeMb", 10, errors, min: 0);
         return new VerifyOptions(mode, samplePercent, minSizeMb);
     }

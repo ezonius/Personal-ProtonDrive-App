@@ -134,6 +134,13 @@ internal static class Program
                 store.Save();
                 return 0;
 
+            case "set-digest":
+                if (args.Length < 2 || args[1] is not ("on" or "off"))
+                    return Fail("Usage: __fake set-digest on|off");
+                store.State.HideDigest = args[1] == "off";
+                store.Save();
+                return 0;
+
             case "set-version":
                 if (args.Length < 2 || string.IsNullOrWhiteSpace(args[1]))
                     return Fail("Usage: __fake set-version <version>");
@@ -202,6 +209,7 @@ internal static class Program
             var bytes = ReadSeedContent(seed);
             var sha1 = Convert.ToHexString(SHA1.HashData(bytes)).ToLowerInvariant();
             node.Sha1 = sha1;
+            node.HideDigest = state.HideDigest;
             node.Size = bytes.Length;
             node.RevUid = drive.NewRevisionUid();
             node.ClaimedMtimeUtc = seed.Mtime?.ToUniversalTime() ?? DateTime.UtcNow;
@@ -250,6 +258,7 @@ internal static class Program
               __fake log
               __fake path
               __fake set-auth on|off
+              __fake set-digest on|off
               __fake set-version <version>
               __fake scenario <scenario.json>
               __fake clear-scenario

@@ -75,10 +75,14 @@ public sealed class Verifier
                 $"verification failed for '{expectedName}': local SHA-1 {localSha1} != remote claim {node.Sha1}");
         }
 
+        // Sample mode only covers uploads whose remote digest is missing: those are
+        // the transfers the listing cannot verify. `minSizeMb` bounds a partial
+        // sample; at 100% every such upload is audited regardless of size.
         var audit = _options.Mode == VerifyMode.Full ||
                     (_options.Mode == VerifyMode.Sample &&
                      string.IsNullOrEmpty(node.Sha1) &&
-                     info.Length >= _options.MinSizeMb * 1024L * 1024L &&
+                     (_options.SamplePercent >= 100 ||
+                      info.Length >= _options.MinSizeMb * 1024L * 1024L) &&
                      IsSampled(expectedName, localSha1, _options.SamplePercent));
 
         if (audit)

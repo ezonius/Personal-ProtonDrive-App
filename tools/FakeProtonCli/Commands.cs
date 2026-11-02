@@ -270,6 +270,7 @@ public sealed class Commands
             current = _drive.CreateNode(parent, fileName, "file");
 
         current.Sha1 = sha1;
+        current.HideDigest = _store.State.HideDigest;
         current.Size = bytes.Length;
         current.RevUid = _drive.NewRevisionUid();
         current.ClaimedMtimeUtc = File.GetLastWriteTimeUtc(local);

@@ -229,7 +229,7 @@ public sealed class Drive
         else
         {
             var digest = new JsonObject { ["sha1Verified"] = false };
-            if (!string.IsNullOrEmpty(node.Sha1))
+            if (!string.IsNullOrEmpty(node.Sha1) && !node.HideDigest)
                 digest["sha1"] = node.Sha1;
 
             obj["mediaType"] = node.Name.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)

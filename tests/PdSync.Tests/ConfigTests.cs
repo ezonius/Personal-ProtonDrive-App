@@ -44,7 +44,7 @@ public sealed class ConfigTests : IDisposable
         sync.Options.Safety.MaxDeletes.Should().Be(200);
         sync.Options.Safety.MaxDeletePercent.Should().Be(10);
         sync.Options.Verify.Mode.Should().Be(VerifyMode.Hash);
-        sync.Options.Verify.SamplePercent.Should().Be(5);
+        sync.Options.Verify.SamplePercent.Should().Be(100);
         sync.Options.Verify.MinSizeMb.Should().Be(10);
         sync.Options.LocalTrash.IsForever.Should().BeTrue();
 

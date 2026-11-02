@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using PdSync.Config;
 using PdSync.Proton;
 using PdSync.Remote;
@@ -1060,6 +1061,12 @@ public static class Planner
         return Math.Abs(l.Mtime.ToUnixTimeMilliseconds() - r.ClaimedMtime.Value.ToUnixTimeMilliseconds()) <= toleranceMs;
     }
 
+    /// <summary>
+    /// Longest leaf this planner will produce. NTFS caps a path component at 255
+    /// UTF-16 units and Proton stores UTF-8 names, so stay inside both limits.
+    /// </summary>
+    private const int MaxLeafLength = 255;
+
     private static string BuildConflictPath(string path, DateTimeOffset now, HashSet<string> used)
     {
         var slash = path.LastIndexOf('/');
@@ -1069,11 +1076,18 @@ public static class Planner
         var stem = dot > 0 ? name[..dot] : name;
         var extension = dot > 0 ? name[dot..] : string.Empty;
         var stamp = now.ToString("yyyy-MM-dd HHmmss", CultureInfo.InvariantCulture);
+        var conflictSuffix = $" (conflict {stamp})";
+
+        // A pathological extension cannot be truncated without changing the file's
+        // identity, so fail at plan time (before any write) instead.
+        if (!FitsLeaf(conflictSuffix + extension))
+            throw new PlanException(
+                $"cannot build a conflict name for {path}: the extension leaves no room for a conflict suffix");
 
         for (var attempt = 1; attempt < 1000; attempt++)
         {
-            var suffix = attempt == 1 ? string.Empty : $" ({attempt})";
-            var candidateName = $"{stem} (conflict {stamp}){suffix}{extension}";
+            var suffix = attempt == 1 ? conflictSuffix : $"{conflictSuffix} ({attempt})";
+            var candidateName = FitLeaf(stem, suffix, extension);
             var candidate = directory.Length > 0 ? directory + "/" + candidateName : candidateName;
             if (used.Add(PathKey.Fold(candidate)))
                 return candidate;
@@ -1081,6 +1095,28 @@ public static class Planner
 
         throw new PlanException($"could not allocate a conflict name for {path}");
     }
+
+    /// <summary>
+    /// Builds <c>stem + suffix + extension</c>, shortening the stem from the end
+    /// until the leaf fits NTFS's 255 UTF-16 units and Proton's 255 UTF-8 bytes.
+    /// The extension and the conflict suffix are never truncated.
+    /// </summary>
+    private static string FitLeaf(string stem, string suffix, string extension)
+    {
+        var fixedPart = suffix + extension;
+        if (FitsLeaf(stem + fixedPart))
+            return stem + fixedPart;
+
+        var length = stem.Length;
+        while (length > 0 && !FitsLeaf(stem[..length] + fixedPart))
+            length--;
+
+        return stem[..length] + fixedPart;
+    }
+
+    private static bool FitsLeaf(string leaf) =>
+        leaf.Length <= MaxLeafLength &&
+        Encoding.UTF8.GetByteCount(leaf) <= MaxLeafLength;
 
     private static string DisplayPath(EntryRecord? b, LocalEntry? l, RemoteEntry? r, string key) =>
         l?.Path ?? r?.Path ?? b?.Path ?? key;

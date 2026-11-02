@@ -452,6 +452,54 @@ public sealed class CliFakeTests
     }
 
     [Fact]
+    public void SampleVerification_DefaultAuditsSmallMissingDigestUploads()
+    {
+        // The default samplePercent is 100: every upload whose remote digest is
+        // missing is audited, even when it is far below minSizeMb.
+        using var fixture = new Fixture(defaults: "verify:\n  mode: sample");
+        fixture.SeedRoot();
+        fixture.Fake("__fake", "set-digest", "off");
+        fixture.WriteLocal("a.txt", "alpha");
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        fixture.InvocationCount("download").Should().Be(1,
+            "a digest-less upload must be downloaded back once even below minSizeMb");
+    }
+
+    [Fact]
+    public void SampleVerification_ZeroPercentSkipsMissingDigestAudit()
+    {
+        using var fixture = new Fixture(defaults: "verify:\n  mode: sample\n  samplePercent: 0");
+        fixture.SeedRoot();
+        fixture.Fake("__fake", "set-digest", "off");
+        fixture.WriteLocal("a.txt", "alpha");
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        fixture.InvocationCount("download").Should().Be(0);
+    }
+
+    [Fact]
+    public void HashVerification_DoesNotAuditMissingDigestUploads()
+    {
+        // Default mode is hash: a missing digest downgrades to size and never
+        // triggers a download-back, so only `sample` pays that cost.
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.Fake("__fake", "set-digest", "off");
+        fixture.WriteLocal("a.txt", "alpha");
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(0, result.Stderr);
+        fixture.InvocationCount("download").Should().Be(0);
+        fixture.RemoteFile("/my-files/root/a.txt").Should().Be("alpha");
+    }
+
+    [Fact]
     public void Run_WritesJsonlRunLog()
     {
         using var fixture = new Fixture();

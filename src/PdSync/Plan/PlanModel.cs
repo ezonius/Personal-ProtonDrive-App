@@ -28,6 +28,10 @@ public enum PlanActionKind
     // compatibility break if that ever changes.
     RemoteDirectoryMove,
     LocalDirectoryMove,
+    // Pure state step: rewrite the baseline subtree to a remote path that the
+    // remote side already moved to, without touching either side. Used when a
+    // remote-side move was applied but its state commit was lost.
+    AdoptRemoteDirectoryMove,
 }
 
 public sealed record PlanAction(
@@ -49,7 +53,8 @@ public sealed record PlanAction(
         PlanActionKind.LocalConflictRename => 2,
         PlanActionKind.DownloadCreate or PlanActionKind.DownloadReplace or PlanActionKind.DownloadRestore => 2,
         PlanActionKind.UploadCreate or PlanActionKind.UploadRevision or PlanActionKind.KeepBothUpload => 3,
-        PlanActionKind.RemoteMove or PlanActionKind.RemoteDirectoryMove => 4,
+        PlanActionKind.RemoteMove or PlanActionKind.RemoteDirectoryMove or
+            PlanActionKind.AdoptRemoteDirectoryMove => 4,
         PlanActionKind.LocalMove or PlanActionKind.LocalDirectoryMove => 5,
         PlanActionKind.LocalTrash => 6,
         PlanActionKind.RemoteTrash or PlanActionKind.CleanupStagedUpload => 7,
@@ -65,6 +70,9 @@ public sealed record PlanAction(
         PlanActionKind.DownloadCreate or PlanActionKind.DownloadReplace or PlanActionKind.DownloadRestore => 30,
         PlanActionKind.UploadCreate or PlanActionKind.UploadRevision or PlanActionKind.KeepBothUpload => 40,
         PlanActionKind.RemoteMove => 50,
+        // Adoption is a pure state rewrite; it must commit before the rename
+        // that consumes the adopted baseline path.
+        PlanActionKind.AdoptRemoteDirectoryMove => 50,
         PlanActionKind.RemoteDirectoryMove => 51,
         PlanActionKind.LocalMove => 60,
         PlanActionKind.LocalDirectoryMove => 61,

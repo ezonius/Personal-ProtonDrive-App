@@ -601,22 +601,44 @@ adoption engine.
     behaviour; a destination whose remote parent is missing is treated as
     ambiguous rather than emitting a move that would fail halfway.
   - **Remote-initiated.** The baseline directory uid disappears from its old
-    path and reappears as a directory at a new remote path. The local subtree at
-    the old path must be unchanged and the new remote subtree must be the
-    baseline subtree moved (same relative paths, kinds and uids, no extra
-    nodes); then the local directory is moved as one unit. A changed local
-    subtree is a blocking `rename` conflict; a locally missing directory falls
-    back to normal remote-only handling. A destination that already exists
-    locally or in the baseline is a blocking conflict.
+    path and reappears as a directory at a new remote path. If the local old
+    path is still the unchanged baseline subtree, and the new remote subtree is
+    the baseline subtree moved (same relative paths, kinds and uids, no extra
+    nodes), the local directory is moved as one unit. A changed local subtree,
+    or a different kind of entry at the old local path, is a blocking `rename`
+    conflict; a destination that already exists locally or in the baseline is a
+    blocking conflict too.
+    - **Adoption when the old local path is gone.** If the old local path is
+      absent, the baseline follows the remote move instead: the baseline subtree
+      is rewritten `P -> R` in one state transaction with **no** local or remote
+      filesystem call. When a local directory `Q` already holds the unchanged
+      baseline subtree (the local half of an interrupted rename), the same run
+      finishes with the expected same-parent `fs rename R -> Q`; when `Q`
+      already equals `R`, only the adoption is needed. Without such a `Q` the
+      old local subtree was deleted, and the next run's normal rules decide what
+      remains. A local entry at `R` that is not the moved baseline subtree, and
+      a local rename to any path other than the intermediate
+      `<parent(Q)>/<oldLeaf>`, are blocking `rename` conflicts: the engine never
+      adopts over, or merges, live local data.
   - **CLI calls.** A same-parent rename is a single `fs rename`. A cross-parent
     move with an unchanged leaf is a single `fs move`. A cross-parent move whose
     leaf also changes is planned as **two journaled actions**: (1) a move-only
     `fs move <P> <parent(Q)>` that keeps the old leaf, and (2) a same-parent
     `fs rename <parent(Q)/<nameP>> <nameQ>`. Each action gets its own pending
-    row and its own state transaction. A failure after step 1 (including process
-    death) leaves the baseline matching the remote at
-    `<parent(Q)/<nameP>>`, so the next run re-detects and completes only the
-    rename instead of uploading a duplicate subtree. Remote paths come from the
+    row and its own state transaction, and every lost-commit window is
+    recoverable by construction:
+    - Step 1 fails (not applied): the baseline is unchanged; the next run
+      re-detects the local rename and retries both steps.
+    - Step 1 applied but its state commit is lost (crash, or a non-replayable
+      `fs move` that returned a timeout/5xx): the next run sees the baseline
+      uid at the intermediate path with the old local path gone, adopts
+      `<parent(Q)/<nameP>>` as the baseline, and completes the remaining
+      same-parent rename. Nothing is downloaded or uploaded.
+    - Step 2 applied but its state commit is lost: the next run adopts `Q` (the
+      path both snapshots now agree on), again with zero transfers.
+
+    In every window the moved subtree is never downloaded and re-uploaded, so a
+    duplicate `P`/`Q` subtree cannot be created. Remote paths come from the
     remote snapshot: the source entry's `Path` and the resolved destination
     parent's `Path`, with parents compared by folded key and the moved leaf
     taken from the remote entry. State rewrites every descendant `entries` row

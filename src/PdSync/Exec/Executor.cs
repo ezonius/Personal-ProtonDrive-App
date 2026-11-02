@@ -173,9 +173,12 @@ public sealed class Executor
                     _failedKeys.Add(action.PathKey);
                     if (action.IsDelete)
                         _failedPrefixes.Add(action.PathKey + "/");
-                    // A failed cross-parent step 1 must suppress step 2:
-                    // its intermediate source path does not exist yet.
-                    if (action.Kind == PlanActionKind.RemoteDirectoryMove &&
+                    // A failed cross-parent step 1 must suppress step 2: its
+                    // intermediate source path does not exist yet. A failed
+                    // adoption must suppress the rename that consumes the
+                    // baseline path it did not rewrite.
+                    if ((action.Kind == PlanActionKind.RemoteDirectoryMove ||
+                         action.Kind == PlanActionKind.AdoptRemoteDirectoryMove) &&
                         action.SecondaryPath is not null)
                         _failedKeys.Add(PathKey.Fold(action.SecondaryPath));
                     _output.WriteLine($"FAILED {Describe(action)}: {ex.Message}");
@@ -278,6 +281,9 @@ public sealed class Executor
                 return null;
             case PlanActionKind.RemoteDirectoryMove:
                 MoveRemoteDirectory(action);
+                return null;
+            case PlanActionKind.AdoptRemoteDirectoryMove:
+                AdoptRemoteDirectoryMove(action);
                 return null;
             case PlanActionKind.LocalMove:
                 MoveLocal(action);
@@ -522,6 +528,19 @@ public sealed class Executor
             _cli.Move(sourceFull, RemoteFull(targetParentFull));
         }
 
+        RewriteMovedSubtree(action, target);
+    }
+
+    /// <summary>
+    /// Rewrites the baseline subtree to the remote path the remote side already
+    /// moved to, without any local or remote filesystem action. A later step in
+    /// the same plan (or the next run) uses the adopted baseline to complete the
+    /// rename instead of downloading the moved subtree.
+    /// </summary>
+    private void AdoptRemoteDirectoryMove(PlanAction action)
+    {
+        var target = action.SecondaryPath
+            ?? throw new SyncException("directory adoption has no target");
         RewriteMovedSubtree(action, target);
     }
 

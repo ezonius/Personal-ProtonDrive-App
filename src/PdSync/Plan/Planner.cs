@@ -78,6 +78,7 @@ public static class Planner
         var directoryMoveKeys = new HashSet<string>(StringComparer.Ordinal);
         var localDirectoryRenames = new Dictionary<string, LocalEntry>(StringComparer.Ordinal);
         var remoteDirectoryRenames = new Dictionary<string, RemoteEntry>(StringComparer.Ordinal);
+        var remoteDirectoryAdoptions = new Dictionary<string, RemoteDirectoryAdoption>(StringComparer.Ordinal);
 
         if (sync.Options.DetectRenames && local.IsComplete && remote.IsComplete)
         {
@@ -90,6 +91,16 @@ public static class Planner
                 baseByKey, allBaseKeys, local, remote, ignoreRules, ignoredPrefixes, skippedPrefixes,
                 claimed, conflicts);
             AddDirectoryMoveClaims(claimed, null, remoteDirectoryRenames, baseByKey, local, remote);
+
+            // A remote-side move whose state commit was lost leaves the remote
+            // subtree at its new path while the baseline still points at the old
+            // one. Adopt the moved remote location into the baseline so the
+            // next step (or the next run) can follow the local rename instead of
+            // downloading the moved subtree and re-uploading it at the target.
+            remoteDirectoryAdoptions = DetectRemoteDirectoryAdoptions(
+                baseByKey, allBaseKeys, local, remote, ignoreRules, ignoredPrefixes, skippedPrefixes,
+                claimed, conflicts);
+            ClaimAdoptionSubtrees(claimed, remoteDirectoryAdoptions, baseByKey, local, remote);
             directoryMoveKeys = claimed;
 
             localRenames = DetectLocalRenames(
@@ -154,6 +165,29 @@ public static class Planner
                 SecondaryPath: target.Path,
                 RemoteUid: target.Uid,
                 Reason: "remote directory was renamed; move the local subtree"));
+        }
+
+        foreach (var (sourceKey, adoption) in remoteDirectoryAdoptions)
+        {
+            actions.Add(new PlanAction(PlanActionKind.AdoptRemoteDirectoryMove,
+                adoption.Baseline.Path, sourceKey,
+                SecondaryPath: adoption.Moved.Path,
+                RemoteUid: adoption.Moved.Uid,
+                Reason: "remote directory was renamed while the local old path is gone; adopt the new remote location"));
+
+            // When the local rename already landed on the final path, one
+            // journaled same-parent rename finishes the interrupted operation.
+            // The cross-parent step-1 move is what put the remote subtree at
+            // <parent(Q)>/<oldLeaf>, so the remaining step is always same-parent.
+            if (adoption.LocalTarget is not null &&
+                adoption.LocalTarget.PathKey != adoption.Moved.PathKey)
+            {
+                actions.Add(new PlanAction(PlanActionKind.RemoteDirectoryMove,
+                    adoption.Moved.Path, adoption.Moved.PathKey,
+                    SecondaryPath: adoption.LocalTarget.Path,
+                    RemoteUid: adoption.Moved.Uid,
+                    Reason: "complete the interrupted directory rename after adopting the moved remote subtree"));
+            }
         }
 
         renameTargets.UnionWith(localRenames.Values.Select(e => e.PathKey));
@@ -779,8 +813,23 @@ public static class Planner
                 continue;
 
             var localOld = local.ByKey.GetValueOrDefault(b.PathKey);
-            if (localOld is null || !localOld.IsDirectory)
-                continue; // the local folder is gone; normal remote-only rules apply
+            if (localOld is not null && !localOld.IsDirectory)
+            {
+                // A file now occupies the old local directory path. Moving the
+                // remote subtree onto (or around) it would destroy local data,
+                // so this is a blocking kind-change conflict, never an
+                // overwrite. A genuinely absent old path is handled by
+                // DetectRemoteDirectoryAdoptions below.
+                conflicts.Add(new PlanConflict(b.Path, b.PathKey, PlanConflictKind.RenameConflict,
+                    PlanResolution.Abort,
+                    "remote directory was renamed but the old local path is a different kind of entry; refusing to overwrite it"));
+                ClaimSubtree(claimed, b.PathKey, baseByKey, local, remote);
+                ClaimSubtree(claimed, moved.PathKey, baseByKey, local, remote);
+                continue;
+            }
+
+            if (localOld is null)
+                continue; // the old local path is gone; adoption below handles it
 
             if (local.ByKey.ContainsKey(moved.PathKey) || HasBaseUnder(allBaseKeys, moved.PathKey))
             {
@@ -811,6 +860,211 @@ public static class Planner
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// One adopted remote-side directory move: the baseline follows the remote
+    /// folder to its new path without any local or remote filesystem action.
+    /// </summary>
+    private sealed record RemoteDirectoryAdoption(
+        EntryRecord Baseline,
+        RemoteEntry Moved,
+        LocalEntry? LocalTarget);
+
+    /// <summary>
+    /// Detects a remote-side directory move whose old local path is gone. This is
+    /// the window left by an interrupted two-step rename: the remote subtree was
+    /// moved (uid U left P and reappeared at R) but its state commit was lost, so
+    /// the baseline still points at P while the local rename already landed at Q.
+    /// Neither the local-initiated rule (R at P is gone) nor the remote-initiated
+    /// rule (the local old path is gone) fires, so without this the planner would
+    /// download R and upload Q, duplicating the subtree. The baseline is adopted
+    /// P -> R (a pure state rewrite) and, when Q is the expected intermediate
+    /// target, a same-parent rename R -> Q finishes the operation. If no local
+    /// copy exists, the old local path was deleted and normal rules decide what
+    /// remains after adoption. A live local path at either the old or the new
+    /// location is never overwritten: it is either the ordinary move case or a
+    /// blocking conflict.
+    /// </summary>
+    private static Dictionary<string, RemoteDirectoryAdoption> DetectRemoteDirectoryAdoptions(
+        IReadOnlyDictionary<string, EntryRecord> baseByKey,
+        IReadOnlySet<string> allBaseKeys,
+        LocalScan local,
+        RemoteSnapshot remote,
+        IgnoreRules? ignoreRules,
+        IReadOnlyList<string> ignoredPrefixes,
+        IReadOnlyList<string> skippedPrefixes,
+        HashSet<string> claimed,
+        List<PlanConflict> conflicts)
+    {
+        var result = new Dictionary<string, RemoteDirectoryAdoption>(StringComparer.Ordinal);
+        var usedTargets = new HashSet<string>(claimed, StringComparer.Ordinal);
+        var claimedRoots = new List<string>();
+
+        var folders = baseByKey.Values
+            .Where(e => e.Kind == EntryKind.Folder)
+            .OrderBy(e => e.PathKey.Length)
+            .ThenBy(e => e.PathKey, StringComparer.Ordinal);
+
+        foreach (var b in folders)
+        {
+            if (IsUnderAny(b.PathKey, claimedRoots) || claimed.Contains(b.PathKey))
+                continue;
+            if (string.IsNullOrEmpty(b.RemoteUid))
+                continue;
+            if (remote.Get(b.PathKey) is not null)
+                continue; // the remote is still at the old path
+            if (local.ByKey.ContainsKey(b.PathKey))
+                continue; // a live local old path: remote-initiated move rules apply
+
+            var moved = remote.GetByUid(b.RemoteUid);
+            if (moved is null || !moved.IsDirectory || moved.PathKey == b.PathKey)
+                continue;
+            if (claimed.Contains(moved.PathKey) || usedTargets.Contains(moved.PathKey))
+                continue;
+            if (KeyBlocked(b.PathKey, local, ignoredPrefixes, skippedPrefixes) ||
+                KeyBlocked(moved.PathKey, local, ignoredPrefixes, skippedPrefixes))
+                continue;
+            if (HasBlockedSubtree(b.PathKey, local, ignoredPrefixes, skippedPrefixes) ||
+                HasBlockedSubtree(moved.PathKey, local, ignoredPrefixes, skippedPrefixes))
+                continue;
+            if (ignoreRules is not null && ignoreRules.IsIgnored(moved.Path, moved.IsDirectory))
+                continue;
+            if (HasRemoteBlockedSubtree(moved.PathKey, remote, ignoreRules))
+                continue;
+            if (!RemoteSubtreeMatchesMovedBase(b.PathKey, moved.PathKey, baseByKey, remote))
+                continue;
+            if (!LocalSubtreeGone(local, b.PathKey))
+                continue;
+
+            // At most one local directory may be the baseline subtree moved. In
+            // the interrupted window this is the final local name Q.
+            LocalEntry? localTarget = null;
+            var ambiguous = false;
+            foreach (var candidate in local.ByKey.Values.OrderBy(e => e.PathKey, StringComparer.Ordinal))
+            {
+                if (!candidate.IsDirectory || candidate.PathKey == b.PathKey)
+                    continue;
+                // Never treat an ancestor of the old path as the rename target.
+                if (IsUnder(b.PathKey, candidate.PathKey + "/"))
+                    continue;
+                if (allBaseKeys.Contains(candidate.PathKey) ||
+                    HasBaseUnder(allBaseKeys, candidate.PathKey))
+                    continue;
+                if (remote.Get(candidate.PathKey) is not null)
+                    continue;
+                if (usedTargets.Contains(candidate.PathKey))
+                    continue;
+                if (KeyBlocked(candidate.PathKey, local, ignoredPrefixes, skippedPrefixes) ||
+                    HasBlockedSubtree(candidate.PathKey, local, ignoredPrefixes, skippedPrefixes))
+                    continue;
+                if (!LocalSubtreeMatchesMovedBase(b.PathKey, candidate.PathKey, baseByKey, local))
+                    continue;
+                if (localTarget is not null)
+                {
+                    ambiguous = true;
+                    break;
+                }
+                localTarget = candidate;
+            }
+
+            if (ambiguous)
+                continue;
+
+            // A local entry already at the remote destination means the local
+            // rename landed on the same path. Accept it only when it is exactly
+            // the moved baseline subtree; a different directory there is local
+            // data that must not be adopted over.
+            var localAtDestination = local.ByKey.GetValueOrDefault(moved.PathKey);
+            if (localTarget is null && localAtDestination is not null)
+            {
+                if (localAtDestination.IsDirectory &&
+                    LocalSubtreeMatchesMovedBase(b.PathKey, moved.PathKey, baseByKey, local))
+                {
+                    localTarget = localAtDestination;
+                }
+                else
+                {
+                    conflicts.Add(new PlanConflict(b.Path, b.PathKey,
+                        PlanConflictKind.RenameConflict, PlanResolution.Abort,
+                        "remote directory was renamed onto a path that already exists locally; refusing to overwrite it"));
+                    ClaimAdoptionSubtrees(claimed, b.PathKey, moved.PathKey, null,
+                        baseByKey, local, remote);
+                    continue;
+                }
+            }
+
+            if (localTarget is not null && localTarget.PathKey != moved.PathKey)
+            {
+                // The remote must sit exactly at the intermediate path of the
+                // interrupted cross-parent rename: <parent(Q)>/<oldLeaf>.
+                // Anything else means both sides moved the same baseline
+                // directory to different destinations; do not guess.
+                var intermediateKey = PathKey.Fold(
+                    CombineRemotePath(ParentPath(localTarget.Path), Leaf(b.Path)));
+                if (!string.Equals(intermediateKey, moved.PathKey, StringComparison.Ordinal))
+                {
+                    conflicts.Add(new PlanConflict(b.Path, b.PathKey,
+                        PlanConflictKind.RenameConflict, PlanResolution.Abort,
+                        "the remote directory moved and the local directory was renamed to a different path; refusing to merge them"));
+                    ClaimAdoptionSubtrees(claimed, b.PathKey, moved.PathKey, localTarget.PathKey,
+                        baseByKey, local, remote);
+                    continue;
+                }
+            }
+
+            result[b.PathKey] = new RemoteDirectoryAdoption(b, moved, localTarget);
+            usedTargets.Add(moved.PathKey);
+            if (localTarget is not null)
+                usedTargets.Add(localTarget.PathKey);
+            claimedRoots.Add(b.PathKey + "/");
+        }
+
+        return result;
+    }
+
+    private static void ClaimAdoptionSubtrees(
+        HashSet<string> claimed,
+        IReadOnlyDictionary<string, RemoteDirectoryAdoption> adoptions,
+        IReadOnlyDictionary<string, EntryRecord> baseByKey,
+        LocalScan local,
+        RemoteSnapshot remote)
+    {
+        foreach (var (sourceKey, adoption) in adoptions)
+        {
+            ClaimAdoptionSubtrees(claimed, sourceKey, adoption.Moved.PathKey,
+                adoption.LocalTarget?.PathKey, baseByKey, local, remote);
+        }
+    }
+
+    private static void ClaimAdoptionSubtrees(
+        HashSet<string> claimed,
+        string baseRootKey,
+        string remoteRootKey,
+        string? localRootKey,
+        IReadOnlyDictionary<string, EntryRecord> baseByKey,
+        LocalScan local,
+        RemoteSnapshot remote)
+    {
+        ClaimRoot(baseRootKey);
+        ClaimRoot(remoteRootKey);
+        if (localRootKey is not null)
+            ClaimRoot(localRootKey);
+
+        void ClaimRoot(string rootKey)
+        {
+            var prefix = rootKey + "/";
+            claimed.Add(rootKey);
+            foreach (var key in baseByKey.Keys)
+                if (key == rootKey || IsUnder(key, prefix))
+                    claimed.Add(key);
+            foreach (var key in local.ByKey.Keys)
+                if (key == rootKey || IsUnder(key, prefix))
+                    claimed.Add(key);
+            foreach (var key in remote.ByKey.Keys)
+                if (key == rootKey || IsUnder(key, prefix))
+                    claimed.Add(key);
+        }
     }
 
     /// <summary>

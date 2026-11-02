@@ -477,8 +477,7 @@ guarantees `plan` and `run` cannot disagree. Implementation:
 `src/PdSync/Plan/Planner.cs`. The remote snapshot is built from
 `ProtonCli` + `RemoteIndex` (`src/PdSync/Proton`, `src/PdSync/Remote`) and uses
 paths relative to the sync root; the absolute remote root is kept only for CLI
-calls. File renames are detected per §5.4; directory renames remain normal
-subtree operations.
+calls. File and directory renames are detected per §5.4.
 
 ### 5.1 Decision table
 
@@ -592,6 +591,79 @@ adoption engine.
   (or a single move if the parent is unchanged). Ambiguous matches fall back to
   trash + upload.
 - Renames are **never** inferred from mtime alone.
+- **Directory renames** are detected in both directions and applied as a
+  subtree move; the children never produce their own trash/upload actions.
+  - **Local-initiated.** Baseline directory P is gone from the local scan (its
+    whole local subtree is absent); a new local directory Q exists that is
+    absent from the baseline (including frozen rows) and the remote listing;
+    Q's subtree is an exact copy of P's baseline subtree (same relative child
+    paths, kinds, sizes and SHA-1s, no changed or extra local children); the
+    remote subtree at P is unchanged (same uids, no extra nodes); and Q's remote
+    parent already exists (the sync root counts). Exactly one candidate Q
+    applies. Zero or several candidates fall back to today's per-child
+    behaviour; a destination whose remote parent is missing is treated as
+    ambiguous rather than emitting a move that would fail halfway.
+  - **Remote-initiated.** The baseline directory uid disappears from its old
+    path and reappears as a directory at a new remote path. If the local old
+    path is still the unchanged baseline subtree, and the new remote subtree is
+    the baseline subtree moved (same relative paths, kinds and uids, no extra
+    nodes), the local directory is moved as one unit. A changed local subtree,
+    or a different kind of entry at the old local path, is a blocking `rename`
+    conflict; a destination that already exists locally or in the baseline is a
+    blocking conflict too.
+    - **Adoption when the old local path is gone.** If the old local path is
+      absent, the baseline follows the remote move instead: the baseline subtree
+      is rewritten `P -> R` in one state transaction with **no** local or remote
+      filesystem call. When a local directory `Q` already holds the unchanged
+      baseline subtree (the local half of an interrupted rename), the same run
+      finishes with the expected same-parent `fs rename R -> Q`; when `Q`
+      already equals `R`, only the adoption is needed. Without such a `Q` the
+      old local subtree was deleted, and the next run's normal rules decide what
+      remains. A local entry at `R` that is not the moved baseline subtree, and
+      a local rename to any path other than the intermediate
+      `<parent(Q)>/<oldLeaf>`, are blocking `rename` conflicts: the engine never
+      adopts over, or merges, live local data.
+  - **CLI calls.** A same-parent rename is a single `fs rename`. A cross-parent
+    move with an unchanged leaf is a single `fs move`. A cross-parent move whose
+    leaf also changes is planned as **two journaled actions**: (1) a move-only
+    `fs move <P> <parent(Q)>` that keeps the old leaf, and (2) a same-parent
+    `fs rename <parent(Q)/<nameP>> <nameQ>`. Each action gets its own pending
+    row and its own state transaction, and every lost-commit window is
+    recoverable by construction:
+    - Step 1 fails (not applied): the baseline is unchanged; the next run
+      re-detects the local rename and retries both steps.
+    - Step 1 applied but its state commit is lost (crash, or a non-replayable
+      `fs move` that returned a timeout/5xx): the next run sees the baseline
+      uid at the intermediate path with the old local path gone, adopts
+      `<parent(Q)/<nameP>>` as the baseline, and completes the remaining
+      same-parent rename. Nothing is downloaded or uploaded.
+    - Step 2 applied but its state commit is lost: the next run adopts `Q` (the
+      path both snapshots now agree on), again with zero transfers.
+
+    In every window the moved subtree is never downloaded and re-uploaded, so a
+    duplicate `P`/`Q` subtree cannot be created. Remote paths come from the
+    remote snapshot: the source entry's `Path` and the resolved destination
+    parent's `Path`, with parents compared by folded key and the moved leaf
+    taken from the remote entry. State rewrites every descendant `entries` row
+    to the new prefix inside the same transaction as the pending row;
+    `remote_uid`, `remote_rev_uid`, sha1s, sizes and `frozen` flags are
+    preserved.
+  - **Ignored and skipped paths.** A directory move is detected only when the old
+    and new subtrees contain no ignored or skipped path in any snapshot; an
+    ignored child would otherwise be smuggled along by the move. Such a rename
+    falls back to today's per-child rules. When the ignored/skipped path exists
+    only on the remote side of the old directory, the fallback is not a quiet
+    per-child move: the remote subtree no longer matches the baseline, so
+    deleting the old local directory raises a blocking
+    `DirectoryDeleteVsModify` conflict (exit 2) and nothing is trashed.
+  - **Nesting.** Only the topmost directory of a moved subtree emits an action;
+    descendants and file-rename candidates inside the old/new prefixes are
+    claimed by that move.
+  - Detection is disabled when `detectRenames` is false or when either scan is
+    incomplete. Fast-mode skipped remote subtrees are synthesized from the
+    baseline and keep `IsComplete` true, so detection is not literally disabled
+    there; this is safe because the skip predicate guarantees the local subtree
+    was unchanged, and a local directory rename makes it change.
 
 #### 5.4.1 Case handling: folded identity, casing is local
 
@@ -610,8 +682,10 @@ Rules:
    the same `path_key`, the sync aborts before executing any action, listing the
    colliding paths and suggesting a rename. We never "pick one and delete the
    other". This applies to local and remote scans equally.
-4. Directories behave like files: a case-only directory rename is a no-op and
-   does not rewrite descendant keys (they are already folded).
+4. Directories behave like files for casing: a case-only directory rename is a
+   no-op and does not rewrite descendant keys (they are already folded). A
+   genuine (non-case) directory rename is a single subtree move per §5.4, never
+   a per-child rewrite.
 
 Consequence worth spelling out: after a case-only local rename, a later content
 edit must still target the existing remote node (`name.txt`). `fs upload` uses
@@ -1350,6 +1424,7 @@ v1 ships at M4; M5 is the "leave it running" bar.
 | Conflict-name format | Keep `stem (conflict YYYY-MM-DD HHMMSS).ext`. Verified live on 2026-11-02: the real account accepts the parentheses, spaces and timestamp, and `fs list`/`fs download` round-trip the name byte-for-byte, so no spike is needed. Added a leaf-length guard: the stem is truncated when the produced name would exceed 255 characters or 255 UTF-8 bytes, while the extension and the conflict suffix are preserved; an extension with no room fails the plan before any write. | §5.2, `Planner.BuildConflictPath`, #15 |
 | `verify.samplePercent` default | **100**. Sample mode only covers uploads whose remote digest is missing — exactly the transfers the listing cannot verify — and pdsync uploads always carry a digest, so the case is rare and auditing all of it is cheap. At 100% the `minSizeMb` gate is bypassed; lower values still sample deterministically and stay size-gated. | §6.5, D15, #15 |
 | `doctor` and Task Scheduler | `doctor` **prints** the verified `schtasks` command and points at `docs/runbook.md`; it never registers a scheduled task or otherwise mutates the OS, consistent with the read-only contract. | §3.1, §9, `docs/runbook.md`, #15 |
+| Directory-rename ambiguity and ignored children | A directory move is applied only with exactly one exact candidate. Zero/multiple candidates, an ignored or skipped descendant, or a destination whose remote parent is absent fall back to today's per-child trash/upload; nested renames collapse to the topmost move. This keeps the v1 rule bounded and makes a wrong move impossible rather than merely unlikely. | §5.4, #10 |
 
 No open decisions remain in this section.
 

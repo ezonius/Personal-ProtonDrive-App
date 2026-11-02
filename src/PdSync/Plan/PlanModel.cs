@@ -23,6 +23,15 @@ public enum PlanActionKind
     RemoteTrash,
     CleanupStagedUpload,
     DropBase,
+    // Appended rather than inserted: nothing reads the numeric payload value
+    // today, but keeping the original numbers stable avoids a latent journal
+    // compatibility break if that ever changes.
+    RemoteDirectoryMove,
+    LocalDirectoryMove,
+    // Pure state step: rewrite the baseline subtree to a remote path that the
+    // remote side already moved to, without touching either side. Used when a
+    // remote-side move was applied but its state commit was lost.
+    AdoptRemoteDirectoryMove,
 }
 
 public sealed record PlanAction(
@@ -31,7 +40,11 @@ public sealed record PlanAction(
     string PathKey,
     string? SecondaryPath = null,
     string? RemoteUid = null,
-    string? Reason = null)
+    string? Reason = null,
+    // Orders steps of one logical operation (a cross-parent directory move is a
+    // move followed by a same-parent rename). Both steps use the same action
+    // kind but must never reorder inside the same phase/order bucket.
+    int Step = 0)
 {
     /// <summary>Dependency-safe execution phase (SPEC §5.5).</summary>
     public int Phase => Kind switch
@@ -40,8 +53,9 @@ public sealed record PlanAction(
         PlanActionKind.LocalConflictRename => 2,
         PlanActionKind.DownloadCreate or PlanActionKind.DownloadReplace or PlanActionKind.DownloadRestore => 2,
         PlanActionKind.UploadCreate or PlanActionKind.UploadRevision or PlanActionKind.KeepBothUpload => 3,
-        PlanActionKind.RemoteMove => 4,
-        PlanActionKind.LocalMove => 5,
+        PlanActionKind.RemoteMove or PlanActionKind.RemoteDirectoryMove or
+            PlanActionKind.AdoptRemoteDirectoryMove => 4,
+        PlanActionKind.LocalMove or PlanActionKind.LocalDirectoryMove => 5,
         PlanActionKind.LocalTrash => 6,
         PlanActionKind.RemoteTrash or PlanActionKind.CleanupStagedUpload => 7,
         PlanActionKind.DropBase => 9,
@@ -56,7 +70,12 @@ public sealed record PlanAction(
         PlanActionKind.DownloadCreate or PlanActionKind.DownloadReplace or PlanActionKind.DownloadRestore => 30,
         PlanActionKind.UploadCreate or PlanActionKind.UploadRevision or PlanActionKind.KeepBothUpload => 40,
         PlanActionKind.RemoteMove => 50,
+        // Adoption is a pure state rewrite; it must commit before the rename
+        // that consumes the adopted baseline path.
+        PlanActionKind.AdoptRemoteDirectoryMove => 50,
+        PlanActionKind.RemoteDirectoryMove => 51,
         PlanActionKind.LocalMove => 60,
+        PlanActionKind.LocalDirectoryMove => 61,
         PlanActionKind.LocalTrash => 70,
         PlanActionKind.RemoteTrash => 80,
         PlanActionKind.CleanupStagedUpload => 85,

@@ -368,7 +368,14 @@ Known gaps / likely next work:
   `remote_trash` table, and `trash restore` restores only when the recorded
   name is unique **and** its uid matches; ambiguity/mismatch exits 2 and points
   at the Proton web app.
-- Directory rename detection is not implemented; file renames are.
+- File and directory renames are implemented. A same-parent directory rename
+  is one `fs rename`; a cross-parent rename is two separately journaled state
+  steps (`fs move` to the new parent keeping the old leaf, then a same-parent
+  `fs rename`), so a failure between them converges on the next run instead of
+  duplicating the subtree. Ambiguous and missing-destination-parent cases fall
+  back to per-child behavior. A remote-only ignored/skipped child blocks
+  detection, and deleting the old local directory then becomes a blocking
+  `DirectoryDeleteVsModify` conflict (exit 2, nothing trashed) (SPEC §5.4).
 - Desktop-app mapping detection is implemented for the Windows desktop app's
   known per-user/machine-wide `Mappings.json` locations; other platforms are a
   no-op because the app does not publish that file there.

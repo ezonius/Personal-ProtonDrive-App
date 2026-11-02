@@ -150,6 +150,22 @@ public sealed class Drive
         return matches.Count == 1 ? matches[0] : null;
     }
 
+    /// <summary>
+    /// Restore resolution mirrors the real CLI 0.9.0 (S15): restore is
+    /// name-addressed only, and a duplicated name restores the first match in
+    /// trash order. <c>/trash/&lt;uid&gt;</c> is rejected ("Trashed node not
+    /// found"); pdsync itself refuses ambiguous names before calling this.
+    /// </summary>
+    public FakeNode? ResolveTrashForRestore(string path)
+    {
+        var segments = SplitPath(path);
+        if (segments is null || segments.Count < 2 || segments[0] != "trash")
+            return null;
+
+        var key = segments[1];
+        return TrashedRoots().FirstOrDefault(n => n.Name == key);
+    }
+
     public FakeNode? ResolveAny(string path) =>
         path.StartsWith("/trash", StringComparison.Ordinal) ? ResolveTrash(path) : ResolveActive(path);
 

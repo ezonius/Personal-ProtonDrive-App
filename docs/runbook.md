@@ -365,6 +365,12 @@ dist/win-x64/PdSync.exe trash purge --older-than 30 --dry-run --config C:\pdsync
 
 # delete run directories older than 30 days
 dist/win-x64/PdSync.exe trash purge --older-than 30 --yes --config C:\pdsync\pdsync.yaml
+
+# undo one pdsync remote trash (name + recorded uid must be unique in /trash)
+dist/win-x64/PdSync.exe trash restore docs some\file.txt --config C:\pdsync\pdsync.yaml
+
+# drop only the local undo record (no Proton call; use after re-syncing a path)
+dist/win-x64/PdSync.exe trash restore docs some\file.txt --forget --config C:\pdsync\pdsync.yaml
 ```
 
 `trash purge` deletes **whole run directories only**, never individual files,
@@ -372,6 +378,13 @@ never anything outside `<stateDir>/trash`, and skips any sync with an active run
 lock (`active-run-lock`). It aborts with exit `6` if a run tree contains a
 reparse point (junction/symlink) or an unreadable entry. Without `--yes` it asks
 for an interactive confirmation; end-of-input cancels with exit `0`.
+
+`trash restore` is the only `trash` subcommand that opens the state DB, takes the
+sync run lock, and calls Proton. It exits `2` and keeps the undo record when the
+name is missing from `/trash`, duplicated, its uid no longer matches, or the path
+is active again in the sync (restore never guesses and never overwrites a
+re-synced path). Use `--forget` to delete just the local record, or the Proton
+web app to disambiguate.
 
 **Run logs** — no rotation, no size cap, no automatic pruning. Rotate or delete
 `<logDir>/<sync-name>/*.jsonl` yourself (e.g. a monthly cleanup task). Keep at
@@ -467,6 +480,14 @@ table (§5).
 > **Status: not yet executed.** Deliverable 1–4 of #14 ship the publish path and
 > this procedure; the soak itself is a separate follow-up and the checklist below
 > must be completed before calling the Task Scheduler recipe "proven".
+
+The live smoke (`tools/live-smoke.ps1`) is the fast companion check for this
+procedure. It also exercises a `keep-both` conflict, including a near-limit
+240-character stem whose conflict name is truncated to 255 characters. On the
+live account this step added ~3 min to an ~8 min run: it seeds and transfers
+two conflicts, uploads two remote edits, downloads two originals, uploads two
+conflict copies, and downloads both copies back to verify their contents. The
+scratch remote root cleanup still covers the conflict files.
 
 Run this on a real machine with a real config, one run per night for 7
 consecutive days, with no manual intervention in between.

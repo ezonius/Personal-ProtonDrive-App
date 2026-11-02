@@ -956,6 +956,37 @@ public sealed class PlannerTests
     }
 
     [Fact]
+    public void RemoteDirectoryRename_DifferentLocalDirectoryAtIntermediateWithMatchingTarget_IsABlockingConflict()
+    {
+        var baseline = new[]
+        {
+            BaselineFolder("moved", "uid-moved"),
+            BaselineFolder("docs", "uid-docs"),
+            BaselineFile("docs/a.txt", "a", ShaA, "uid-a", "rev-a"),
+        };
+        // Local docs -> moved/renamed landed, but a different local directory
+        // also sits at the remote intermediate path moved/docs.
+        var local = Scan(
+            LocalDirectory("moved"),
+            LocalDirectory("moved/renamed"),
+            Local("moved/renamed/a.txt", "a", 1000),
+            LocalDirectory("moved/docs"),
+            Local("moved/docs/other.txt", "x", 1000));
+        var remote = Remote(
+            RemoteDirectory("moved", "uid-moved"),
+            RemoteDirectory("moved/docs", "uid-docs"),
+            RemoteFile("moved/docs/a.txt", "uid-a", "rev-a", "a", ShaA));
+
+        var result = Plan(baseline, local, remote);
+
+        result.HasBlockingConflicts.Should().BeTrue();
+        result.Adoptions.Should().BeEmpty();
+        result.Actions.Should().BeEmpty();
+        result.Conflicts.Should().Contain(c =>
+            c.Kind == PlanConflictKind.RenameConflict && c.PathKey == PathKey.Fold("docs"));
+    }
+
+    [Fact]
     public void RemoteDirectoryRename_AfterSameParentRenameCommitLost_AdoptsOnly()
     {
         var baseline = new[]

@@ -971,28 +971,27 @@ public static class Planner
             if (ambiguous)
                 continue;
 
-            // A local entry already at the remote destination means the local
-            // rename landed on the same path. Accept it only when it is exactly
-            // the moved baseline subtree; a different directory there is local
-            // data that must not be adopted over.
+            // A local entry already at the remote destination is local data the
+            // engine must never adopt over: it is acceptable only when it is
+            // exactly the moved baseline subtree. This check must run even when a
+            // separate local rename target Q exists, otherwise an unrelated local
+            // directory at the intermediate path R is silently claimed and later
+            // uploaded as a duplicate subtree.
             var localAtDestination = local.ByKey.GetValueOrDefault(moved.PathKey);
-            if (localTarget is null && localAtDestination is not null)
+            if (localAtDestination is not null &&
+                !(localAtDestination.IsDirectory &&
+                  LocalSubtreeMatchesMovedBase(b.PathKey, moved.PathKey, baseByKey, local)))
             {
-                if (localAtDestination.IsDirectory &&
-                    LocalSubtreeMatchesMovedBase(b.PathKey, moved.PathKey, baseByKey, local))
-                {
-                    localTarget = localAtDestination;
-                }
-                else
-                {
-                    conflicts.Add(new PlanConflict(b.Path, b.PathKey,
-                        PlanConflictKind.RenameConflict, PlanResolution.Abort,
-                        "remote directory was renamed onto a path that already exists locally; refusing to overwrite it"));
-                    ClaimAdoptionSubtrees(claimed, b.PathKey, moved.PathKey, null,
-                        baseByKey, local, remote);
-                    continue;
-                }
+                conflicts.Add(new PlanConflict(b.Path, b.PathKey,
+                    PlanConflictKind.RenameConflict, PlanResolution.Abort,
+                    "remote directory was renamed onto a path that already exists locally; refusing to overwrite it"));
+                ClaimAdoptionSubtrees(claimed, b.PathKey, moved.PathKey, localTarget?.PathKey,
+                    baseByKey, local, remote);
+                continue;
             }
+
+            if (localTarget is null && localAtDestination is not null)
+                localTarget = localAtDestination;
 
             if (localTarget is not null && localTarget.PathKey != moved.PathKey)
             {

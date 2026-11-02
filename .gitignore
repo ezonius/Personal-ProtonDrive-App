@@ -6,5 +6,6 @@ tmp/
 docs/spikes-results.json
 docs/spikes-results.md
 .pdsync-fake-state/
+dist/
 
 /proton-drive.exe

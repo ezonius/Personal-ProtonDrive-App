@@ -110,7 +110,19 @@ public static class ConfigValidator
             }
         }
 
-        var minVersion = string.IsNullOrWhiteSpace(raw?.MinVersion) ? null : raw.MinVersion.Trim();
+        // The CLI version this project is built and live-tested against. The
+        // value stays config-overridable, including raising it.
+        var minVersion = "0.9.0";
+        if (!string.IsNullOrWhiteSpace(raw?.MinVersion))
+        {
+            minVersion = raw.MinVersion.Trim();
+            if (!CliVersion.TryParseStrict(minVersion, out _))
+            {
+                errors.Add(
+                    $"proton.minVersion: invalid version '{minVersion}' (expected major.minor.patch, e.g. 0.9.0)");
+            }
+        }
+
         return new ProtonOptions(cli, minVersion);
     }
 

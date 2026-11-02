@@ -49,8 +49,32 @@ public sealed class ConfigTests : IDisposable
         sync.Options.LocalTrash.IsForever.Should().BeTrue();
 
         config.Proton.Cli.Should().Be("proton-drive");
-        config.Proton.MinVersion.Should().BeNull();
+        config.Proton.MinVersion.Should().Be("0.9.0");
         config.LogDir.Should().Be(_temp.Combine("state", "logs"));
+    }
+
+    [Fact]
+    public void ProtonMinVersion_OverrideIsHonored()
+    {
+        var yaml = ConfigTestHelper.MinimalYaml(_temp, extraRoot: "proton:\n  minVersion: \"1.2.3\"");
+
+        var config = Load(yaml);
+
+        config.Proton.MinVersion.Should().Be("1.2.3");
+    }
+
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("0.9")]
+    [InlineData("1.2.3.4")]
+    public void ProtonMinVersion_InvalidValueIsAConfigError(string value)
+    {
+        var yaml = ConfigTestHelper.MinimalYaml(_temp,
+            extraRoot: $"proton:\n  minVersion: \"{value}\"");
+
+        var ex = Assert.Throws<ConfigException>(() => Load(yaml));
+
+        ex.Message.Should().Contain("proton.minVersion").And.Contain(value);
     }
 
     [Fact]

@@ -57,6 +57,7 @@ __fake dump                      # print state.json
 __fake log                       # print invocations.jsonl
 __fake path                      # print the state dir
 __fake set-auth on|off
+__fake set-version <version>     # override the --version line (default 0.9.0)
 __fake scenario <scenario.json>  # install a fault-injection scenario
 __fake clear-scenario
 ```

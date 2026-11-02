@@ -127,7 +127,7 @@ public enum VerifyMode
     Full,
 }
 
-public sealed record ProtonOptions(string Cli, string? MinVersion);
+public sealed record ProtonOptions(string Cli, string MinVersion);
 
 public sealed record SafetyOptions(int MaxDeletes, int MaxDeletePercent)
 {

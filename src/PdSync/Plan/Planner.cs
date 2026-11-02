@@ -133,11 +133,20 @@ public static class Planner
             // A remote-only staging node with the exact staged-upload grammar is
             // a leftover from an interrupted rename/verification. Trash it
             // instead of inventing a local file. Baseline-tracked, adopted, and
-            // any non-matching names keep their normal plan path.
-            if (b is null && l is null && r is not null && !r.IsDirectory &&
-                StagedUpload.IsStagingLeaf(Leaf(r.Path)))
+            // any non-matching names keep their normal plan path. The cleanup
+            // is gated by CanCleanStagedLeftover, shared with the opt-in branch
+            // below: an incomplete local scan may hide a present file of the
+            // same name, so trash and download are both deferred (SPEC §8).
+            if (b is null && IsStagedLeftoverCandidate(l, r))
             {
-                actions.Add(new PlanAction(PlanActionKind.CleanupStagedUpload, r.Path, key,
+                if (!CanCleanStagedLeftover(local, l, r))
+                {
+                    skipped.Add(new PlanSkip(r!.Path, key, PlanSkipReason.IncompleteLocalScan,
+                        "local scan was incomplete; staged-leftover cleanup is deferred"));
+                    continue;
+                }
+
+                actions.Add(new PlanAction(PlanActionKind.CleanupStagedUpload, r!.Path, key,
                     RemoteUid: r.Uid,
                     Reason: "automatic cleanup: baseline-absent leftover remote staging node from a failed upload rename or verification"));
                 continue;
@@ -148,15 +157,14 @@ public static class Planner
             // automatically: it may have been user content. The explicit flag
             // allows trashing a remote-only artifact that would otherwise be
             // restored or conflict on every run.
-            // local.IsComplete is required: an incomplete scan can leave a
-            // present local file out of Entries, and trashing its remote node
-            // would violate the local-absent guard (SPEC §8). The ordinary
-            // IncompleteLocalScan deferral below handles that case.
-            if (context.CleanupStaged && local.IsComplete &&
-                b is not null && l is null && r is not null &&
-                !r.IsDirectory && StagedUpload.IsStagingLeaf(Leaf(r.Path)))
+            // The shared CanCleanStagedLeftover gate requires local.IsComplete:
+            // an incomplete scan can leave a present local file out of Entries,
+            // and trashing its remote node would violate the local-absent guard
+            // (SPEC §8). The ordinary IncompleteLocalScan deferral below handles
+            // that case.
+            if (context.CleanupStaged && b is not null && CanCleanStagedLeftover(local, l, r))
             {
-                actions.Add(new PlanAction(PlanActionKind.CleanupStagedUpload, r.Path, key,
+                actions.Add(new PlanAction(PlanActionKind.CleanupStagedUpload, r!.Path, key,
                     RemoteUid: r.Uid,
                     Reason: "opt-in cleanup: adopted/historical remote staging node left by a pre-#21 or baseline-tracked upload"));
                 continue;
@@ -244,6 +252,17 @@ public static class Planner
 
         return new PlanResult(actions, conflicts, skipped, adoptions, keys.Count);
     }
+
+    // Shape of a remote-only staged-upload leftover: no local entry and a
+    // regular remote file whose leaf matches the exact staging grammar.
+    private static bool IsStagedLeftoverCandidate(LocalEntry? l, RemoteEntry? r) =>
+        l is null && r is not null && !r.IsDirectory &&
+        StagedUpload.IsStagingLeaf(Leaf(r.Path));
+
+    // Shared gate for the automatic and opt-in cleanup branches so they cannot
+    // drift. A cleanup is only safe when the local scan is complete.
+    private static bool CanCleanStagedLeftover(LocalScan local, LocalEntry? l, RemoteEntry? r) =>
+        local.IsComplete && IsStagedLeftoverCandidate(l, r);
 
     private static void PlanOne(
         SyncConfig sync,

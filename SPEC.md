@@ -455,11 +455,13 @@ fall back to `R.claimedSize == L.size` and
 re-uploads and clock-skew cases without a transfer. It is an optimization only;
 it never invents content.
 
-**Staging-leftover footnote.** When B is absent, L is absent, and R is a file
-whose leaf is exactly `pdsync-upload-` followed by 12 lowercase hex characters,
-the action is `cleanup.staged-upload` (Proton Trash) instead of
-`download.create`, with the reason prefix `automatic cleanup:`. Baseline-tracked,
-adopted, non-matching, and directory nodes never take this automatic branch.
+**Staging-leftover footnote.** When B is absent, L is absent, the local scan is
+complete, and R is a file whose leaf is exactly `pdsync-upload-` followed by 12
+lowercase hex characters, the action is `cleanup.staged-upload` (Proton Trash)
+instead of `download.create`, with the reason prefix `automatic cleanup:`. An
+incomplete local scan defers the cleanup with `incomplete-local-scan`, mirroring
+the opt-in gate. Baseline-tracked, adopted, non-matching, and directory nodes
+never take this automatic branch.
 
 **Opt-in staging cleanup.** `run --cleanup-staged` adds a second branch for the
 adopted/historical case: the local scan is complete, B is present, L is absent,
@@ -630,9 +632,11 @@ Notes:
   exception: the session is gone, so same-run cleanup is skipped and the next
   run handles the leftover. Any remote-only leftover whose leaf matches the
   exact staging grammar and is not in the baseline is trashed by the next run as
-  an `automatic cleanup` staging action, never downloaded or treated as a
-  conflict. A staging node that is already in the baseline (adopted or
-  historical, including pre-#21 leftovers) is never touched automatically: a
+  an `automatic cleanup` staging action when the local scan is complete, never
+  downloaded or treated as a conflict; an incomplete local scan defers it with
+  `incomplete-local-scan`. A staging node that is already in the baseline
+  (adopted or historical, including pre-#21 leftovers) is never touched
+  automatically: a
   normal run may restore it or conflict exactly as it would for ordinary user
   content. `run --cleanup-staged` is the explicit opt-in that instead trashes a
   baseline-recorded, local-absent staging node with the `opt-in cleanup` reason.
@@ -971,7 +975,8 @@ Non-negotiable, enforced before any destructive action:
    `cleanup.staged-upload` may Proton-Trash a remote-only file whose leaf is
    exactly `pdsync-upload-<12 lowercase hex>`, either automatically when it is
    baseline-absent or under the explicit `run --cleanup-staged` opt-in when it
-   is baseline-recorded and `L` is absent in a complete local scan. It never
+   is baseline-recorded, and requires `L` absent in a complete local scan for
+   both the automatic and opt-in forms. It never
    applies to non-matching or directory nodes, and the opt-in branch never
    applies while a local counterpart exists (including when the scan is
    incomplete and the file is merely unscanned).

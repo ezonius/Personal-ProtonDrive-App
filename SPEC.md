@@ -129,7 +129,10 @@ Spawn and auth failures keep their existing mapping (auth 3, other CLI failure
 1). Equal or newer versions pass unchanged.
 
 `doctor` is read-only toward state: it never creates, migrates, backs up, or
-writes the state DB or fast-counter files, and it takes no run lock. An existing
+writes the state DB or fast-counter files, and it takes no run lock. It is also
+read-only toward the operating system: it never registers the Windows Task
+Scheduler job. It prints the `schtasks` command instead and points at
+`docs/runbook.md`, which carries the verified recipe. An existing
 DB with an older schema is reported as a `warn` check and exit stays 0 when that
 is the only finding; a DB written by a newer schema remains a `FAIL` check
 (exit 1) with an `upgrade pdsync` remedy, and a structurally broken DB remains a
@@ -246,7 +249,7 @@ defaults:
     maxDeletePercent: 10        # of tracked entries
   verify:
     mode: hash                  # hash | size | sample | full
-    samplePercent: 5            # when mode=sample
+    samplePercent: 100          # when mode=sample; 100 = audit every missing-digest upload
     minSizeMb: 10               # only sample files at least this big
   localTrash:
     retention: forever          # forever | <days> (manual purge only in v1)
@@ -529,7 +532,7 @@ Policy (`conflict:`) applies to both-changed files:
 
 | Policy | Behavior |
 |---|---|
-| `keep-both` | Local file is renamed to `stem (conflict YYYY-MM-DD HHMMSS).ext`; remote original is downloaded to the original path; the conflict-named local file is uploaded. Both contents survive on both sides. |
+| `keep-both` | Local file is renamed to `stem (conflict YYYY-MM-DD HHMMSS).ext`; remote original is downloaded to the original path; the conflict-named local file is uploaded. Both contents survive on both sides. The format was verified live against the real account on 2026-11-02 (upload, `fs list`, and `fs download` all preserve the name byte-for-byte). If the produced leaf would exceed 255 characters or 255 UTF-8 bytes, the stem is truncated from the end so the leaf fits both limits; the extension and the ` (conflict ...)` suffix are never truncated, and an extension that leaves no room fails the plan before any write. Collisions with an existing name append ` (2)`, ` (3)`, … before the extension, compared case-folded. |
 | `local-wins` | Upload local as the new revision of the remote file. Remote's previous revision remains in history (Proton keeps revisions); the current remote content is overwritten. |
 | `remote-wins` | Download remote over local; the replaced local file is moved to local trash first. |
 | `newer-wins` **(default)** | Compare local mtime vs remote `claimedModificationTime`. If the difference is ≤ `mtimeToleranceMs`, or either timestamp is in the future by more than the tolerance, fall back to `keep-both`. Otherwise the newer side wins: upload for local, download for remote. The decision and both timestamps are written to the run report. |
@@ -831,10 +834,13 @@ signal, not as a security boundary.
 | Download | local size == remote `claimedSize`; AEAD decryption succeeded; local SHA-1 == digest from the remote listing when present | no extra call |
 
 Implementation: `Verifier` performs one parent listing per upload, compares size
-first, then the claimed SHA-1 when present. `sample` downloads back only a
-deterministic percentage of uploads whose digest is missing and whose size is at
-least `minSizeMb`; `full` downloads back every upload. A missing digest
-downgrades to size rather than failing the transfer.
+first, then the claimed SHA-1 when present. `sample` downloads back only
+uploads whose digest is missing — the transfers the listing cannot verify — with
+`samplePercent` (default **100**, i.e. every such upload) selecting a
+size-bucketed subset; `minSizeMb` bounds a partial sample, and at 100% the size
+gate is bypassed so nothing unverifiable is skipped. `full` downloads back every
+upload. A missing digest downgrades to size rather than failing the transfer and
+is recorded as the verification method, so the gap stays visible.
 
 Modes (`verify.mode`):
 
@@ -843,14 +849,19 @@ Modes (`verify.mode`):
   used only for spot checks, never per file.
 - **`size`** — `claimedSize` plus a changed `activeRevision.uid`. Use for very
   large trees or when digests are missing.
-- **`sample`** — download back a deterministic percentage of uploads (files ≥
-  `minSizeMb`) **only when the remote digest is absent**, hash, compare, delete.
+- **`sample`** — download back uploads **only when the remote digest is absent**
+  (the case the listing cannot verify), hash, compare, delete. `samplePercent`
+  defaults to `100`; lower values sample deterministically by `name + sha1` and
+  are further gated by `minSizeMb`. With our own CLI the digest is always
+  present, so this mode exists for imports and digest-less remote state.
 - **`full`** — audit mode (`pdsync verify --sync <name>`): download every upload
   and compare. Never routine.
 
 A failed verification leaves the local file untouched, marks the entry
 `unverified`, and retries the upload next run. A missing digest on a file we just
-uploaded is a verification failure: our CLI always supplies one.
+uploaded is not treated as a failure: the CLI normally supplies one, so its
+absence is recorded as the `size` method (with `sample` auditing it when that
+mode is on) instead of blocking a transfer that otherwise succeeded.
 
 ### 6.6 Desktop-app mapping detection
 
@@ -1289,7 +1300,7 @@ v1 ships at M4; M5 is the "leave it running" bar.
 | Ignore file scope | one `.pdignore` per sync root, no global file, no nested files in v1 | D12, §3.3 |
 | `--fast` | allowed, approximate, with periodic full scans and a hard no-deletions rule | D13, §6.3 |
 | Case handling | case-folded identity, casing never synced, collisions abort | D14/D16, §5.4.1 |
-| Verification depth | remote plaintext SHA-1 (fallback size), sampled download-back for missing digests | D15, §6.5 |
+| Verification depth | remote plaintext SHA-1 (fallback size), download-back for uploads whose digest is missing (`samplePercent` default 100) | D15, §6.5 |
 
 ### 2026-11-01
 
@@ -1306,14 +1317,11 @@ v1 ships at M4; M5 is the "leave it running" bar.
 | Question | Decision | Where it landed |
 |---|---|---|
 | `proton.minVersion` enforcement | An unsupported CLI version **fails**, it does not warn. `plan`, `run`, and `doctor` parse the `--version` line and exit **1** when it is older than `proton.minVersion`; `doctor` also prints a failing check. The default floor is `0.9.0`, config-overridable (including raising it); a malformed configured value is a config error (exit 4). An unparsable detected version fails closed (exit 1). Auth stays exit 3 and other CLI spawn failures stay exit 1. | §3.1, §3.2, §9 NFR-9, #11 |
+| Conflict-name format | Keep `stem (conflict YYYY-MM-DD HHMMSS).ext`. Verified live on 2026-11-02: the real account accepts the parentheses, spaces and timestamp, and `fs list`/`fs download` round-trip the name byte-for-byte, so no spike is needed. Added a leaf-length guard: the stem is truncated when the produced name would exceed 255 characters or 255 UTF-8 bytes, while the extension and the conflict suffix are preserved; an extension with no room fails the plan before any write. | §5.2, `Planner.BuildConflictPath`, #15 |
+| `verify.samplePercent` default | **100**. Sample mode only covers uploads whose remote digest is missing — exactly the transfers the listing cannot verify — and pdsync uploads always carry a digest, so the case is rare and auditing all of it is cheap. At 100% the `minSizeMb` gate is bypassed; lower values still sample deterministically and stay size-gated. | §6.5, D15, #15 |
+| `doctor` and Task Scheduler | `doctor` **prints** the verified `schtasks` command and points at `docs/runbook.md`; it never registers a scheduled task or otherwise mutates the OS, consistent with the read-only contract. | §3.1, §9, `docs/runbook.md`, #15 |
 
-Still open (can be decided during M0/M4, not blocking design):
-
-1. Conflict-name format — `(conflict YYYY-MM-DD HHMMSS)` proposed; Proton may
-   dislike parentheses in some clients, so a spike can confirm.
-2. `samplePercent` default for `verify.mode: sample` (5% proposed).
-3. Whether `doctor` should offer to register the Windows Task Scheduler job, or
-   just print the `schtasks` command.
+No open decisions remain in this section.
 
 ---
 

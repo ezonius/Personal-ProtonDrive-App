@@ -178,7 +178,8 @@ These are the easiest invariants to break. Check `SPEC.md` §2 for the full list
     the CLI call and removed inside the same transaction as the state commit.
 12. **Verification uses `claimedDigests.sha1` as a fingerprint, never as a
     security boundary.** Missing digest downgrades to size. `full` downloads
-    uploads back; `sample` does so deterministically for missing digests.
+    uploads back; `sample` does so for missing digests (`samplePercent` defaults
+    to 100, i.e. every such upload).
 13. **One account, serialized CLI calls.** Never run two live CLI operations in
     parallel; caches and rate limits are shared. `ProtonCli` locks internally.
 14. **Config is strict.** Unknown keys, duplicate YAML keys, invalid enum values,
@@ -205,6 +206,7 @@ __fake dump
 __fake log
 __fake path
 __fake set-auth on|off
+__fake set-digest on|off
 __fake set-version <version>
 __fake scenario <scenario.json>
 __fake clear-scenario
@@ -234,7 +236,7 @@ parallelism is otherwise disabled in the assembly/test setup.
 - Cross-volume moves or staging changes: add a focused unit/integration test.
 
 Prefer behavior assertions over implementation details. The current suite is
-**419 tests**.
+**424 tests**.
 
 ---
 

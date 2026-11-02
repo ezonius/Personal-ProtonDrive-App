@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using PdSync.Config;
 using PdSync.Exec;
+using PdSync.Proton;
 using PdSync.State;
 
 namespace PdSync.Cli;
@@ -39,6 +40,18 @@ public static class TrashCommand
         bool HasManifest);
 
     private sealed record SkippedJsonRow(string SyncId, long RunId, string Path, string Reason);
+
+    private sealed record RestorePathResult(
+        string Path,
+        string Status,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Reason,
+        [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        IReadOnlyList<string>? CandidateUids);
+
+    private sealed record RestoreJsonResult(
+        string Command,
+        string Sync,
+        IReadOnlyList<RestorePathResult> Results);
 
     public static int ExecuteList(
         PdsyncConfig config,
@@ -222,6 +235,151 @@ public static class TrashCommand
             output.WriteLine($"  skip active {run.SyncId}/{run.RunId}  {run.Path}");
         return 0;
     }
+
+    /// <summary>
+    /// <c>pdsync trash restore &lt;sync&gt; &lt;path...&gt;</c> (SPEC §6.2, S15).
+    /// Restore is name-addressed only: the CLI cannot address a trashed node by
+    /// UID, and name collisions are silently arbitrary. The durable
+    /// <c>remote_trash</c> record supplies the expected UID, so this command
+    /// restores only when the recorded name identifies exactly one node with
+    /// that UID; every other case refuses with exit 2.
+    /// </summary>
+    public static int ExecuteRestore(
+        PdsyncConfig config,
+        IReadOnlyList<string> syncNames,
+        IReadOnlyList<string> rawPaths,
+        bool json,
+        TextWriter output,
+        TextWriter error)
+    {
+        var sync = ResolveSingleSync(config, syncNames);
+
+        var databasePath = Path.Combine(
+            config.StateDir, "state",
+            StateStore.ComputeSyncId(sync.LocalRoot, sync.RemoteRoot) + ".sqlite");
+        if (!File.Exists(databasePath))
+        {
+            error.WriteLine(
+                $"pdsync: no state database for sync '{sync.Name}'; run pdsync run first");
+            return 1;
+        }
+
+        using var runLock = RunLock.Acquire(config, sync);
+        using var state = StateStore.Open(config, sync);
+        var cli = new ProtonCli(config.Proton.Cli);
+        IReadOnlyList<ProtonNode>? trash = null;
+
+        var results = new List<RestorePathResult>();
+        var exit = 0;
+        foreach (var raw in rawPaths)
+        {
+            var path = NormalizeRestorePath(raw);
+            var pathKey = PathKey.Fold(path);
+            var record = state.GetRemoteTrash(pathKey);
+            if (record is null)
+            {
+                results.Add(new RestorePathResult(path, "missing",
+                    $"no pdsync trash record for {path}", null));
+                exit = Math.Max(exit, 1);
+                continue;
+            }
+
+            trash ??= cli.List("/trash");
+            var leaf = LeafName(record.Path);
+            var candidates = trash.Where(node =>
+                string.Equals(node.Name, leaf, StringComparison.Ordinal)).ToList();
+
+            if (candidates.Count == 0)
+            {
+                results.Add(new RestorePathResult(path, "uid-mismatch",
+                    $"recorded node {ShortUid(record.RemoteUid)} is no longer in trash; refusing to restore a different node",
+                    null));
+                exit = Math.Max(exit, 2);
+                continue;
+            }
+
+            if (candidates.Count > 1)
+            {
+                var uids = candidates.Select(node => node.Uid).OrderBy(uid => uid, StringComparer.Ordinal).ToList();
+                results.Add(new RestorePathResult(path, "ambiguous",
+                    $"trash holds {candidates.Count} nodes named '{leaf}'; restore manually in the Proton web app (UID addressing is unsupported by the CLI as of 0.9.0)",
+                    uids));
+                exit = Math.Max(exit, 2);
+                continue;
+            }
+
+            var match = candidates[0];
+            if (!string.Equals(match.Uid, record.RemoteUid, StringComparison.Ordinal))
+            {
+                results.Add(new RestorePathResult(path, "uid-mismatch",
+                    $"recorded node {ShortUid(record.RemoteUid)} is no longer in trash; refusing to restore a different node",
+                    new[] { match.Uid }));
+                exit = Math.Max(exit, 2);
+                continue;
+            }
+
+            state.InTransaction(() =>
+            {
+                cli.Restore("/trash/" + leaf);
+                state.DeleteRemoteTrash(pathKey);
+            });
+            results.Add(new RestorePathResult(path, "restored", null, null));
+        }
+
+        if (json)
+        {
+            WriteJson(output, new RestoreJsonResult("trash-restore", sync.Name, results));
+            return exit;
+        }
+
+        foreach (var result in results)
+        {
+            if (result.Status == "restored")
+            {
+                output.WriteLine($"restored {result.Path}");
+                continue;
+            }
+
+            error.WriteLine($"pdsync: {result.Path}: {result.Reason}");
+            if (result.CandidateUids is { Count: > 0 })
+                error.WriteLine($"  candidates: {string.Join(", ", result.CandidateUids)}");
+        }
+
+        return exit;
+    }
+
+    private static SyncConfig ResolveSingleSync(
+        PdsyncConfig config,
+        IReadOnlyList<string> syncNames)
+    {
+        var distinct = syncNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (distinct.Count != 1)
+            throw new ConfigException(
+                "trash restore requires exactly one sync (positional or --sync)");
+
+        var match = config.Syncs.FirstOrDefault(sync =>
+            string.Equals(sync.Name, distinct[0], StringComparison.OrdinalIgnoreCase));
+        if (match is null)
+            throw new ConfigException($"unknown sync '{distinct[0]}'");
+        return match;
+    }
+
+    private static string NormalizeRestorePath(string raw)
+    {
+        var value = PathKey.Nfc(raw.Replace('\\', '/').Trim('/'));
+        if (value.Length == 0)
+            throw new ConfigException("trash restore requires a relative path");
+        return value;
+    }
+
+    private static string LeafName(string path)
+    {
+        var slash = path.LastIndexOf('/');
+        return slash < 0 ? path : path[(slash + 1)..];
+    }
+
+    private static string ShortUid(string uid) =>
+        uid.Length <= 8 ? uid : uid[..8];
 
     private static PurgeJsonRow PurgeRow(LocalTrashIndex.TrashRun run) =>
         new(run.SyncId, run.RunId, run.Path, run.CreatedAt, run.FileCount, run.Bytes, run.HasManifest);

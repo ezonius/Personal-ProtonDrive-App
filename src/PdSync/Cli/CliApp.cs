@@ -810,17 +810,33 @@ public static class CliApp
         CliArguments args,
         TextReader input,
         TextWriter output,
-        TextWriter error) =>
-        args.Subcommand == "list"
+        TextWriter error)
+    {
+        if (args.Subcommand == "restore")
+        {
+            IReadOnlyList<string> syncNames = args.SyncNames;
+            IReadOnlyList<string> restorePaths = args.RestoreArguments;
+            if (syncNames.Count == 0)
+            {
+                syncNames = new[] { restorePaths[0] };
+                restorePaths = restorePaths.Skip(1).ToList();
+            }
+
+            return TrashCommand.ExecuteRestore(
+                config, syncNames, restorePaths, args.Json, output, error);
+        }
+
+        return args.Subcommand == "list"
             ? TrashCommand.ExecuteList(config, args.SyncNames, args.Json, output, error)
             : TrashCommand.ExecutePurge(
                 config, args.SyncNames, args.OlderThanDays!.Value, args.DryRun,
                 args.Yes, args.Json, input, output, error);
+    }
 
     private static string? ValidateTrashArguments(CliArguments args)
     {
-        if (args.Subcommand is not ("list" or "purge"))
-            return "trash requires a subcommand: list or purge";
+        if (args.Subcommand is not ("list" or "purge" or "restore"))
+            return "trash requires a subcommand: list, purge, or restore";
         if (args.Fast || args.Full || args.Force || args.Interactive)
             return "trash accepts only --config, --sync, --json, --verbose, --yes, --dry-run, --older-than, and --no-color";
         if (args.UnexpectedPositional)
@@ -829,6 +845,15 @@ public static class CliApp
             return "trash list accepts only --config, --sync, --json, --verbose, and --no-color";
         if (args.Subcommand == "purge" && args.OlderThanDays is null)
             return "trash purge requires --older-than <days>";
+        if (args.Subcommand == "restore")
+        {
+            if (args.OlderThanDays is not null || args.DryRun || args.Yes)
+                return "trash restore accepts only --config, --sync, --json, --verbose, and --no-color";
+            if (args.RestoreArguments.Count == 0)
+                return "trash restore requires <sync> <path...>";
+            if (args.SyncNames.Count == 0 && args.RestoreArguments.Count < 2)
+                return "trash restore requires <sync> <path...>";
+        }
         return null;
     }
 
@@ -978,6 +1003,8 @@ public static class CliApp
               trash list          list local trash runs; never writes
               trash purge --older-than <days> [--dry-run] [--yes]
                                   delete whole trash run directories (manual only)
+              trash restore <sync> <path...> [--json]
+                                  undo a pdsync remote trash action when the name is unique
               rebuild <sync> --policy=<p> [--yes] [--dry-run]
                                   rebuild state from local+remote (last resort)
 
@@ -1018,6 +1045,7 @@ public static class CliApp
         public string? Subcommand { get; private set; }
         public string? PathArgument { get; private set; }
         public List<string> SyncNames { get; } = new();
+        public List<string> RestoreArguments { get; } = new();
 
         public static CliArguments Parse(string[] args)
         {
@@ -1117,6 +1145,8 @@ public static class CliApp
                 Command = arg;
             else if (Command == "trash" && Subcommand is null)
                 Subcommand = arg;
+            else if (Command == "trash" && Subcommand == "restore")
+                RestoreArguments.Add(arg);
             else if (Command == "ignore" && PathArgument is null)
                 PathArgument = arg;
             else

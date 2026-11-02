@@ -504,7 +504,17 @@ public sealed class Executor
 
     private void TrashRemote(PlanAction action)
     {
+        // The durable record is written inside the caller's transaction, next
+        // to the entry delete and pending-row removal. Resolve the UID before
+        // the CLI call so a node can never be trashed without an undo record.
+        var uid = action.RemoteUid
+            ?? _remote.Get(action.PathKey)?.Uid
+            ?? _baseByKey.GetValueOrDefault(action.PathKey)?.RemoteUid;
+        if (string.IsNullOrEmpty(uid))
+            throw new SyncException($"cannot record remote trash for {action.Path}: remote uid is unknown");
+
         _cli.Trash(RemoteFull(action.Path));
+        _state.RecordRemoteTrash(action.Path, action.PathKey, uid, _runId);
         _state.DeleteEntry(action.PathKey);
     }
 

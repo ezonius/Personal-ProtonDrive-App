@@ -333,6 +333,55 @@ public sealed class StateStoreTests : IDisposable
     }
 
     [Fact]
+    public void RemoteTrash_RoundTripsAndDeletes()
+    {
+        var (config, sync) = CreateConfig();
+        using var store = StateStore.Open(config, sync);
+
+        store.RecordRemoteTrash("sub/a.txt", "sub/a.txt", "uid-1", 7);
+        var record = store.GetRemoteTrash("sub/a.txt");
+
+        record.Should().NotBeNull();
+        record!.Path.Should().Be("sub/a.txt");
+        record.RemoteUid.Should().Be("uid-1");
+        record.RunId.Should().Be(7);
+        record.TrashedAt.Should().BeCloseTo(DateTimeOffset.UtcNow, TimeSpan.FromMinutes(1));
+
+        store.DeleteRemoteTrash("sub/a.txt");
+        store.GetRemoteTrash("sub/a.txt").Should().BeNull();
+    }
+
+    [Fact]
+    public void Open_MigratesV1SchemaAndCreatesRemoteTrash()
+    {
+        var (config, sync) = CreateConfig();
+        string path;
+        using (var store = StateStore.Open(config, sync))
+            path = store.DatabasePath;
+
+        using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = """
+                DROP TABLE remote_trash;
+                PRAGMA user_version = 1;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        using var migrated = StateStore.Open(config, sync);
+        migrated.RecordRemoteTrash("a.txt", "a.txt", "uid-2", 8);
+        migrated.GetRemoteTrash("a.txt")!.RemoteUid.Should().Be("uid-2");
+
+        using var connection2 = new SqliteConnection($"Data Source={path};Pooling=False");
+        connection2.Open();
+        using var version = connection2.CreateCommand();
+        version.CommandText = "PRAGMA user_version;";
+        Convert.ToInt32(version.ExecuteScalar()).Should().Be(2);
+    }
+
+    [Fact]
     public void ComputeSyncId_IsStableAndDistinct()
     {
         var local = _temp.Combine("local");

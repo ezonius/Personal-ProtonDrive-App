@@ -72,6 +72,8 @@ pdsync status [--json]           # last run per sync, pending conflicts
 pdsync ignore <path>             # explain which pattern matched (debug)
 pdsync trash list [--sync <name>] [--json]   # local trash inventory; never writes
 pdsync trash purge --older-than <days> [--dry-run] [--yes] [--sync <name>] [--json]
+pdsync trash restore <sync> <path...> [--json]
+                                  # undo a pdsync remote-trash action when the name is unique
 pdsync history [sync...] [--limit N] [--json]  # recent runs and action totals; never writes
 pdsync rebuild <sync> --policy=adopt|keep-both|local-wins|remote-wins
                                   # rebuild state from local+remote (last resort)
@@ -708,10 +710,16 @@ Notes:
   SQLite caches and one account rate limit.
 - A per-call timeout applies (default 10 min, configurable); a hung download is
   killed and retried at most twice.
-- `/trash` is account-global and names repeat across runs. Restoring by
-  `/trash/<name>` is ambiguous; use `/trash/<uid>` (S15) and keep the node UID in
-  state so a trash action can be undone deterministically. Name-based restore is
-  only used when the name is unique.
+- `/trash` is account-global and names repeat across runs. S15 proved that the
+  CLI 0.9.0 has **no UID-addressed restore**: `/trash/<uid>` is reported as
+  `Trashed node not found`, and `/trash/<uid>/<name>` is unsupported. Restore is
+  name-only (`/trash/<name>`), and a duplicated name restores an arbitrary node
+  without warning. pdsync therefore refuses to guess: the executor records
+  `(path, path_key, remote_uid, trashed_at, run_id)` for every remote trash
+  action, and `pdsync trash restore` restores only when the recorded leaf name
+  matches exactly one trashed node **and** its uid equals the recorded uid.
+  Ambiguity or a uid mismatch exits 2 and points at the Proton web app; pdsync
+  never falls back to permanent deletion.
 - Pass `--json` to every command. Upload JSON is only a counter:
   `{transferredItems, transferredBytes, skippedItems, failedItems, failures[]}` —
   it carries no revision or hash, so verification comes from a parent listing.
@@ -926,7 +934,17 @@ entries(sync_id, path_key, path, kind,
         frozen INTEGER DEFAULT 0, last_synced_at)
 pending(id INTEGER PK, sync_id, op, path, payload_json, started_at)
 runs(id INTEGER PK, sync_id, started_at, finished_at, status, stats_json)
+remote_trash(sync_id, path_key, path, remote_uid, trashed_at, run_id,
+             PRIMARY KEY (sync_id, path_key))
 ```
+
+The `remote_trash` row is written in the same transaction as the executor's
+entry delete and pending-row removal, so a committed remote trash action always
+has a durable undo record. `pdsync trash restore` is the only reader; `plan`,
+`doctor`, and `trash list` never query it. Schema v2 adds this table; a v1 DB is
+migrated by the next writable open (`run`, `rebuild`, or `trash restore`) after
+the usual backup. Read-only opens of an older schema keep the existing warning
+behavior and are never migrated in place.
 
 Rules:
 
@@ -1255,10 +1273,9 @@ cannot represent — that is the documented hard error.
 | S12 | How accurate is `claimedModificationTime` after an upload (same second? timezone? sub-second?) and does it match the local mtime? | `newer-wins` and `adopt` both depend on this. |
 | S13 | Does downloading a file into a folder that already has a case-colliding name overwrite, rename, or fail? Does upload from a hardlinked staging file behave identically to a normal file? | Case policy (§5.4.1) and staging uploads (§6.2). |
 | S14 | How does the CLI treat local paths containing `[`, `]`, `{`, `}`, `*`, `?`? Does upload `--json` return per-file data? | Local-path glob escaping (§6.2.1) and verification strategy (§6.5). |
-| S15 | Can `fs restore /trash/<uid>` disambiguate same-named trashed nodes? | Deterministic undo for deletions (§6.2). Open; verify in M1. |
+| S15 | Can `fs restore /trash/<uid>` disambiguate same-named trashed nodes? | Deterministic undo for deletions (§6.2). **Answered 2026-11-02:** no; name-only with unique-name + recorded-uid fallback. |
 
-**Results (2026-10-31):** `docs/spikes.md`. S1–S7 and S9–S14 answered; S15
-open. S8's live probe is deferred (deliberately expiring the login would break
+**Results (2026-11-02):** `docs/spikes.md`. S1–S7, S9–S14, and S15 answered. S8's live probe is deferred (deliberately expiring the login would break
 the rest of the suite), but pdsync's exit-3/abort/no-retry/no-commit contract is
 covered by deterministic fake-CLI tests (`AuthExpiryTests`); see docs §7. Headline corrections to the design: plaintext SHA-1 **is** available,
 folder mtime does **not** propagate, local paths are glob-expanded, and each CLI
@@ -1271,7 +1288,7 @@ call costs ~2–4 s.
 | M | Scope | Exit criteria |
 |---|---|---|
 | M0 | Spikes S1–S14 | **Done 2026-10-31**: `docs/spikes.md`; S8 live probe deferred but fake-CLI auth-expiry coverage added, no blocking unknowns |
-| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, pure planner + remote index **(done)**, FakeProtonCli planner tests **(done)**, `doctor`, `plan` CLI **(done, live-smoked)**; restore-by-UID check (S15) | `plan` on a real tree lists correct creates; zero writes |
+| M1 | Config **(done)**, state DB **(done)**, local scan + ignore **(done)**, pure planner + remote index **(done)**, FakeProtonCli planner tests **(done)**, `doctor`, `plan` CLI **(done, live-smoked)**; restore-by-UID check (S15) **(done 2026-11-02: unsupported, name-unique fallback)** | `plan` on a real tree lists correct creates; zero writes |
 | M2 | Push path: create dirs, upload creates/revisions, verify, state commit **(done, live-smoked)** | Push-only sync converges; second run is a no-op |
 | M3 | Pull path: staged download, local trash, remote index **(done)**, executor **(done, live-smoked)** | Pull converges; interrupted download never corrupts a local file |
 | M4 | Two-way: deletions both ways, conflicts, renames, adoption, budgets; planner truth table **(done)**; executor/pending journal **(done, live-smoked)** | Truth-table suite green; live smoke passes; exit codes correct |

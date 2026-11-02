@@ -1112,7 +1112,7 @@ public sealed class CliFakeTests
         var result = fixture.Cli("doctor");
 
         result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
-        result.Stdout.Should().Contain("warn sync docs state: State database schema v0 is not current (v1); run pdsync run to migrate it");
+        result.Stdout.Should().Contain("warn sync docs state: State database schema v0 is not current (v2); run pdsync run to migrate it");
         result.Stdout.Should().Contain("sync docs staged leftovers: skipped: state schema not current");
         result.Stdout.Split('\n').Count(line => line.StartsWith("warn ", StringComparison.Ordinal))
             .Should().Be(1, "one warning per sync, not one per probe");
@@ -1135,7 +1135,7 @@ public sealed class CliFakeTests
         {
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "PRAGMA user_version = 2;";
+            command.CommandText = "PRAGMA user_version = 3;";
             command.ExecuteNonQuery();
         }
 
@@ -1143,14 +1143,14 @@ public sealed class CliFakeTests
 
         doctor.ExitCode.Should().Be(1, doctor.Stdout + doctor.Stderr);
         doctor.Stdout.Should().Contain(
-            "FAIL sync docs state: State database schema v2 is newer than this build (v1); upgrade pdsync.");
+            "FAIL sync docs state: State database schema v3 is newer than this build (v2); upgrade pdsync.");
         doctor.Stdout.Should().NotContain("run pdsync run to migrate it");
         doctor.Stdout.Should().Contain("doctor: problems found");
 
         var plan = fixture.Cli("plan");
 
         plan.ExitCode.Should().NotBe(0, plan.Stdout + plan.Stderr);
-        plan.Stderr.Should().Contain("State database schema v2 is newer than this build (v1)");
+        plan.Stderr.Should().Contain("State database schema v3 is newer than this build (v2)");
         plan.Stderr.Should().Contain("upgrade pdsync");
     }
 
@@ -2060,6 +2060,137 @@ public sealed class CliFakeTests
 
         result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
         result.Stderr.Should().Contain("--policy is only valid with rebuild");
+    }
+
+    [Fact]
+    public void TrashRestore_RestoresRecordedNodeAndDeletesRecord()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("keep.txt", "keep");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        File.Delete(fixture.LocalFull("a.txt"));
+        var trashRun = fixture.Cli("run", "--force");
+        trashRun.ExitCode.Should().Be(0, trashRun.Stdout + trashRun.Stderr);
+        fixture.IsTrashed("/my-files/root/a.txt").Should().BeTrue();
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        restore.ExitCode.Should().Be(0, restore.Stdout + restore.Stderr);
+        restore.Stdout.Should().Contain("restored a.txt");
+        fixture.IsTrashed("/my-files/root/a.txt").Should().BeFalse();
+        using var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single());
+        state.GetRemoteTrash("a.txt").Should().BeNull();
+    }
+
+    [Fact]
+    public void TrashRestore_DuplicateTrashNameRefusesAndRestoresNothing()
+    {
+        using var fixture = new Fixture();
+        fixture.Fake("__fake", "seed", fixture.Temp.Write("seed.json", """
+            {
+              "auth": true,
+              "nodes": [
+                { "path": "/my-files/root", "type": "folder" },
+                { "path": "/my-files/root/a.txt", "type": "file", "content": "root" },
+                { "path": "/my-files/other/a.txt", "type": "file", "content": "other" }
+              ]
+            }
+            """));
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("keep.txt", "keep");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        File.Delete(fixture.LocalFull("a.txt"));
+        fixture.Cli("run", "--force").ExitCode.Should().Be(0);
+        fixture.IsTrashed("/my-files/root/a.txt").Should().BeTrue();
+
+        fixture.Fake("fs", "trash", "/my-files/other/a.txt");
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        restore.ExitCode.Should().Be(2, restore.Stdout + restore.Stderr);
+        restore.Stderr.Should().Contain("nodes named 'a.txt'");
+        restore.Stderr.Should().Contain("Proton web app");
+        fixture.IsTrashed("/my-files/root/a.txt").Should().BeTrue();
+        fixture.IsTrashed("/my-files/other/a.txt").Should().BeTrue();
+        using var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single());
+        state.GetRemoteTrash("a.txt").Should().NotBeNull();
+    }
+
+    [Fact]
+    public void TrashRestore_RecordedUidGoneRefusesToRestoreAnotherNode()
+    {
+        using var fixture = new Fixture();
+        fixture.Fake("__fake", "seed", fixture.Temp.Write("seed.json", """
+            {
+              "auth": true,
+              "nodes": [
+                { "path": "/my-files/root", "type": "folder" },
+                { "path": "/my-files/root/a.txt", "type": "file", "content": "root" },
+                { "path": "/my-files/other/a.txt", "type": "file", "content": "other" }
+              ]
+            }
+            """));
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("keep.txt", "keep");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        File.Delete(fixture.LocalFull("a.txt"));
+        fixture.Cli("run", "--force").ExitCode.Should().Be(0);
+
+        // The recorded node is permanently removed from trash; a different
+        // node later reuses the same leaf name.
+        fixture.Fake("fs", "delete", "/trash/a.txt");
+        fixture.Fake("fs", "trash", "/my-files/other/a.txt");
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        restore.ExitCode.Should().Be(2, restore.Stdout + restore.Stderr);
+        restore.Stderr.Should().Contain("is no longer in trash");
+        restore.Stderr.Should().Contain("refusing to restore a different node");
+        fixture.IsTrashed("/my-files/other/a.txt").Should().BeTrue();
+    }
+
+    [Fact]
+    public void TrashRestore_MissingRecordReturnsExit1()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        var restore = fixture.Cli("trash", "restore", "docs", "nope.txt");
+
+        restore.ExitCode.Should().Be(1, restore.Stdout + restore.Stderr);
+        restore.Stderr.Should().Contain("no pdsync trash record for nope.txt");
+    }
+
+    [Fact]
+    public void TrashRestore_WithoutStateDatabaseExits1AndCreatesNothing()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        restore.ExitCode.Should().Be(1, restore.Stdout + restore.Stderr);
+        restore.Stderr.Should().Contain("no state database");
+        fixture.StateTreeEntries().Should().BeEmpty();
+    }
+
+    [Fact]
+    public void TrashRestore_TakesTheRunLock()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        using var held = PdSync.Exec.RunLock.Acquire(fixture.Config, fixture.Config.Syncs.Single());
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        restore.ExitCode.Should().Be(5, restore.Stdout + restore.Stderr);
     }
 
     private sealed class Fixture : IDisposable

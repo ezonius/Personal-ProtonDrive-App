@@ -35,6 +35,18 @@ public sealed record EntryRecord(
     bool Frozen,
     DateTimeOffset? LastSyncedAt);
 
+/// <summary>
+/// One remote node that pdsync moved to Proton Trash. The UID is the only
+/// unambiguous identity the CLI exposes, so it is recorded with the folded path
+/// key at the moment the trash action commits.
+/// </summary>
+public sealed record RemoteTrashRecord(
+    string PathKey,
+    string Path,
+    string RemoteUid,
+    DateTimeOffset TrashedAt,
+    long RunId);
+
 public sealed record PendingRecord(
     long Id,
     string Op,
@@ -91,7 +103,7 @@ public sealed class StateSchemaTooNewException : StateException
 /// </summary>
 public sealed class StateStore : IDisposable
 {
-    public const int SchemaVersion = 1;
+    public const int SchemaVersion = 2;
 
     private readonly SqliteConnection _connection;
     private SqliteTransaction? _transaction;
@@ -358,6 +370,72 @@ public sealed class StateStore : IDisposable
         command.ExecuteNonQuery();
     }
 
+    // ------------------------------------------------------------ remote trash
+
+    /// <summary>
+    /// Records the node the executor just moved to Proton Trash. Called inside
+    /// the same transaction as the entry delete and the pending-row removal.
+    /// </summary>
+    public void RecordRemoteTrash(
+        string path,
+        string pathKey,
+        string remoteUid,
+        long runId,
+        DateTimeOffset? trashedAt = null)
+    {
+        ThrowIfDisposed();
+        using var command = CreateCommand();
+        command.CommandText = """
+            INSERT INTO remote_trash (sync_id, path_key, path, remote_uid, trashed_at, run_id)
+            VALUES ($sync, $key, $path, $uid, $trashed, $run)
+            ON CONFLICT(sync_id, path_key) DO UPDATE SET
+                path = excluded.path,
+                remote_uid = excluded.remote_uid,
+                trashed_at = excluded.trashed_at,
+                run_id = excluded.run_id;
+            """;
+        command.Parameters.AddWithValue("$sync", SyncId);
+        command.Parameters.AddWithValue("$key", pathKey);
+        command.Parameters.AddWithValue("$path", path);
+        command.Parameters.AddWithValue("$uid", remoteUid);
+        command.Parameters.AddWithValue("$trashed", FormatTimestamp(trashedAt ?? DateTimeOffset.UtcNow));
+        command.Parameters.AddWithValue("$run", runId);
+        command.ExecuteNonQuery();
+    }
+
+    public RemoteTrashRecord? GetRemoteTrash(string pathKey)
+    {
+        ThrowIfDisposed();
+        using var command = CreateCommand();
+        command.CommandText = """
+            SELECT path_key, path, remote_uid, trashed_at, run_id
+            FROM remote_trash
+            WHERE sync_id = $sync AND path_key = $key;
+            """;
+        command.Parameters.AddWithValue("$sync", SyncId);
+        command.Parameters.AddWithValue("$key", pathKey);
+
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+            return null;
+        return new RemoteTrashRecord(
+            reader.GetString(0),
+            reader.GetString(1),
+            reader.GetString(2),
+            ParseTimestamp(reader.GetString(3)),
+            reader.GetInt64(4));
+    }
+
+    public void DeleteRemoteTrash(string pathKey)
+    {
+        ThrowIfDisposed();
+        using var command = CreateCommand();
+        command.CommandText = "DELETE FROM remote_trash WHERE sync_id = $sync AND path_key = $key;";
+        command.Parameters.AddWithValue("$sync", SyncId);
+        command.Parameters.AddWithValue("$key", pathKey);
+        command.ExecuteNonQuery();
+    }
+
     // ------------------------------------------------------------------ pending
 
     public long AddPending(string op, string path, string? payloadJson = null)
@@ -571,7 +649,17 @@ public sealed class StateStore : IDisposable
         {
             using var transaction = connection.BeginTransaction();
             CreateSchemaV1(connection, transaction);
-            SetUserVersion(connection, 1, transaction);
+            CreateSchemaV2(connection, transaction);
+            SetUserVersion(connection, 2, transaction);
+            transaction.Commit();
+            return;
+        }
+
+        if (version == 1)
+        {
+            using var transaction = connection.BeginTransaction();
+            CreateSchemaV2(connection, transaction);
+            SetUserVersion(connection, 2, transaction);
             transaction.Commit();
             return;
         }
@@ -640,6 +728,27 @@ public sealed class StateStore : IDisposable
             CREATE INDEX ix_entries_sync ON entries(sync_id);
             CREATE INDEX ix_pending_sync ON pending(sync_id);
             CREATE INDEX ix_runs_sync_started ON runs(sync_id, started_at);
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static void CreateSchemaV2(SqliteConnection connection, SqliteTransaction transaction)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            CREATE TABLE remote_trash (
+                sync_id TEXT NOT NULL,
+                path_key TEXT NOT NULL,
+                path TEXT NOT NULL,
+                remote_uid TEXT NOT NULL,
+                trashed_at TEXT NOT NULL,
+                run_id INTEGER NOT NULL,
+                PRIMARY KEY (sync_id, path_key),
+                FOREIGN KEY (sync_id) REFERENCES syncs(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX ix_remote_trash_sync ON remote_trash(sync_id);
             """;
         command.ExecuteNonQuery();
     }

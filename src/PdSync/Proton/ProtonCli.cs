@@ -251,6 +251,17 @@ public sealed class ProtonCli
         _ = document.RootElement;
     }
 
+    /// <summary>
+    /// Restores one trashed node by its <c>/trash/&lt;name&gt;</c> path. The CLI
+    /// (0.9.0) has no UID-addressed restore (S15), so callers must prove the
+    /// name is unique before calling. Non-replayable: a timed-out restore is
+    /// reconciled from the next <c>/trash</c> listing, never replayed blindly.
+    /// </summary>
+    public void Restore(string trashPath)
+    {
+        Run(ProtonCallKind.NonReplayable, "fs", "restore", EscapePath(trashPath));
+    }
+
     private IReadOnlyList<ProtonNode> ListRemote(string remotePath)
     {
         var result = Run(ProtonCallKind.Idempotent, "fs", "list", "--json", EscapePath(remotePath));

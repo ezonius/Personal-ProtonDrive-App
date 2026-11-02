@@ -150,6 +150,25 @@ public sealed class Drive
         return matches.Count == 1 ? matches[0] : null;
     }
 
+    /// <summary>
+    /// Restore resolution mirrors the real CLI: an exact UID is accepted, and a
+    /// name is accepted by choosing the first match in trash order when it is
+    /// duplicated. pdsync itself refuses ambiguous names before calling this.
+    /// </summary>
+    public FakeNode? ResolveTrashForRestore(string path)
+    {
+        var segments = SplitPath(path);
+        if (segments is null || segments.Count < 2 || segments[0] != "trash")
+            return null;
+
+        var key = segments[1];
+        var byUid = State.Nodes.FirstOrDefault(n => n.Trashed && n.Uid == key);
+        if (byUid is not null)
+            return byUid;
+
+        return TrashedRoots().FirstOrDefault(n => n.Name == key);
+    }
+
     public FakeNode? ResolveAny(string path) =>
         path.StartsWith("/trash", StringComparison.Ordinal) ? ResolveTrash(path) : ResolveActive(path);
 

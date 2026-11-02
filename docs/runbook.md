@@ -468,6 +468,14 @@ table (§5).
 > this procedure; the soak itself is a separate follow-up and the checklist below
 > must be completed before calling the Task Scheduler recipe "proven".
 
+The live smoke (`tools/live-smoke.ps1`) is the fast companion check for this
+procedure. It also exercises a `keep-both` conflict, including a near-limit
+240-character stem whose conflict name is truncated to 255 characters. On the
+live account this step added ~3 min to an ~8 min run: it seeds and transfers
+two conflicts, uploads two remote edits, downloads two originals, uploads two
+conflict copies, and downloads both copies back to verify their contents. The
+scratch remote root cleanup still covers the conflict files.
+
 Run this on a real machine with a real config, one run per night for 7
 consecutive days, with no manual intervention in between.
 

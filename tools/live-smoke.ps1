@@ -5,8 +5,16 @@
 
 .DESCRIPTION
   Exercises upload, remote-origin download, local deletion -> Proton Trash,
-  remote deletion -> local trash, ignored files, fast/full runs, and verifies
-  a pushed file by downloading it back with the official CLI.
+  remote deletion -> local trash, ignored files, fast/full runs, keep-both
+  conflicts (including a near-limit 240-character stem), and verifies a
+  pushed file by downloading it back with the official CLI.
+
+  The keep-both step seeds and conflicts two files (one with a near-limit
+  stem), makes two remote edits with proton-drive.exe, and downloads both
+  produced conflict copies back: measured ~3 min on the live account
+  (11 min total), because this account's transfers are slow. It also creates
+  a local file whose full Windows path exceeds MAX_PATH, so the machine needs
+  long-path support.
 
   The remote root is created as /my-files/<Name>. If the run succeeds and
   -KeepRemote is not specified, the scratch root is trashed and then permanently
@@ -21,13 +29,17 @@
 .PARAMETER KeepRemote
   Leave the remote scratch folder in place (useful for debugging).
 
+.PARAMETER SkipConflict
+  Skip the keep-both conflict step (including the near-limit stem case).
+
 .EXAMPLE
   pwsh -File tools/live-smoke.ps1
 #>
 param(
     [string]$Name = "pdsync-live-smoke-$(Get-Date -Format 'yyyyMMdd-HHmmss')",
     [string]$RemoteParent = '/my-files',
-    [switch]$KeepRemote
+    [switch]$KeepRemote,
+    [switch]$SkipConflict
 )
 
 $ErrorActionPreference = 'Stop'
@@ -101,6 +113,7 @@ proton:
   cli: '$cli'
 defaults:
   settleSeconds: 0
+  conflict: keep-both
   verify:
     mode: hash
   safety:
@@ -192,6 +205,91 @@ syncs:
     $full = Invoke-PdSyncJson @('run', '--config', $config, '--full', '--json')
     Assert ($full.exitCode -eq 0) 'full run exits 0'
     Assert ($full.syncs[0].fast -eq $false) 'full run forced a full listing'
+
+    if (-not $SkipConflict) {
+        Write-Step 'keep-both conflict keeps both copies (including a near-limit stem)'
+        $conflictName = 'conflict.txt'
+        $longStem = 'n' * 240
+        $longName = "$longStem.txt"
+        $localConflict = Join-Path $local $conflictName
+        $localLong = Join-Path $local $longName
+
+        Set-Content -Path $localConflict -Value "baseline conflict`n" -NoNewline -Encoding utf8
+        Set-Content -Path $localLong -Value "baseline long stem`n" -NoNewline -Encoding utf8
+        $conflictSeed = Invoke-PdSyncJson @('run', '--config', $config, '--json')
+        Assert ($conflictSeed.exitCode -eq 0) 'conflict seed run exits 0'
+        Assert ($conflictSeed.syncs[0].failed -eq 0) 'conflict seed run has zero failed actions'
+
+        # Change both sides: local files first, then the same remote names through the CLI.
+        Set-Content -Path $localConflict -Value "local conflict edit`n" -NoNewline -Encoding utf8
+        Set-Content -Path $localLong -Value "local long-stem edit`n" -NoNewline -Encoding utf8
+        $remoteStaging = Join-Path $work 'remote-edit'
+        New-Item -ItemType Directory -Force -Path $remoteStaging | Out-Null
+        $remoteConflict = Join-Path $remoteStaging $conflictName
+        $remoteLong = Join-Path $remoteStaging $longName
+        Set-Content -Path $remoteConflict -Value "remote conflict edit`n" -NoNewline -Encoding utf8
+        Set-Content -Path $remoteLong -Value "remote long-stem edit`n" -NoNewline -Encoding utf8
+        Invoke-Cli @('fs', 'upload', '--json', '--file-conflict-strategy', 'create-new-revision', $remoteConflict, $remoteRoot) | Out-Null
+        Invoke-Cli @('fs', 'upload', '--json', '--file-conflict-strategy', 'create-new-revision', $remoteLong, $remoteRoot) | Out-Null
+
+        $conflictPlan = Invoke-PdSyncJson @('plan', '--config', $config, '--json')
+        $conflictActions = @($conflictPlan.syncs[0].actions)
+        $shortRename = @($conflictActions | Where-Object { $_.kind -eq 'LocalConflictRename' -and $_.path -eq $conflictName })
+        Assert ($shortRename.Count -eq 1) 'plan renames the conflicting local copy'
+        Assert ($shortRename[0].secondaryPath -match '^conflict \(conflict \d{4}-\d{2}-\d{2} \d{6}\)\.txt$') 'conflict name matches the documented format'
+        Assert (@($conflictActions | Where-Object { $_.kind -eq 'KeepBothUpload' -and $_.path -eq $shortRename[0].secondaryPath }).Count -eq 1) 'plan uploads the conflict copy'
+
+        $longRename = @($conflictActions | Where-Object { $_.kind -eq 'LocalConflictRename' -and $_.path -eq $longName })
+        Assert ($longRename.Count -eq 1) 'plan renames the long-stem conflicting copy'
+        $plannedLongName = $longRename[0].secondaryPath
+        Assert ($plannedLongName.Length -le 255) 'planned long-stem conflict name fits 255 characters'
+        Assert ($plannedLongName.EndsWith('.txt')) 'planned long-stem conflict name keeps its extension'
+        Assert ($plannedLongName.Contains(' (conflict ')) 'planned long-stem conflict name contains the conflict marker'
+
+        $conflictRun = Invoke-PdSyncJson @('run', '--config', $config, '--json')
+        Assert ($conflictRun.exitCode -eq 0) 'keep-both conflict run exits 0'
+        Assert ($conflictRun.syncs[0].failed -eq 0) 'keep-both conflict run has zero failed actions'
+
+        $localConflictCopy = @(Get-ChildItem -Path $local -File |
+            Where-Object { $_.Name -match '^conflict \(conflict \d{4}-\d{2}-\d{2} \d{6}\)\.txt$' })
+        Assert ($localConflictCopy.Count -eq 1) 'local directory gained the conflict-named copy'
+        Assert ((Get-Content -Raw $localConflict) -eq "remote conflict edit`n") 'conflict.txt holds the remote content locally'
+        Assert ((Get-Content -Raw $localConflictCopy[0].FullName) -eq "local conflict edit`n") 'conflict copy holds the local content'
+
+        $localLongCopy = @(Get-ChildItem -Path $local -File |
+            Where-Object { $_.Name -match '^n+ \(conflict \d{4}-\d{2}-\d{2} \d{6}\)\.txt$' })
+        Assert ($localLongCopy.Count -eq 1) 'local directory gained the long-stem conflict copy'
+        $longConflictName = $localLongCopy[0].Name
+        Assert ($longConflictName.Length -le 255) 'long-stem conflict name is at most 255 characters'
+        Assert ($longConflictName.EndsWith('.txt')) 'long-stem conflict name keeps its extension'
+        Assert ($longConflictName.Contains(' (conflict ')) 'long-stem conflict name contains the conflict marker'
+        Assert ((Get-Content -Raw $localLong) -eq "remote long-stem edit`n") 'long-stem original holds the remote content locally'
+        Assert ((Get-Content -Raw $localLongCopy[0].FullName) -eq "local long-stem edit`n") 'long-stem conflict copy holds the local content'
+
+        $conflictNodes = Convert-CliJson (Invoke-Cli @('fs', 'list', $remoteRoot, '--json'))
+        $conflictNodeNames = @($conflictNodes | ForEach-Object { $_.name.value })
+        Assert ($conflictNodeNames -contains $conflictName) 'remote still has conflict.txt'
+        Assert ($conflictNodeNames -contains $longName) 'remote still has the long-stem original'
+        Assert ($conflictNodeNames -contains $localConflictCopy[0].Name) 'remote has the conflict-named copy'
+        Assert ($conflictNodeNames -contains $longConflictName) 'remote has the long-stem conflict copy'
+
+        # Remote originals keep the CLI-uploaded content; compare the CLI's claimed SHA-1.
+        $remoteConflictNode = @($conflictNodes | Where-Object { $_.name.value -eq $conflictName })[0]
+        $remoteLongNode = @($conflictNodes | Where-Object { $_.name.value -eq $longName })[0]
+        Assert ($remoteConflictNode.activeRevision.claimedDigests.sha1 -eq (Get-FileHash -Algorithm SHA1 $remoteConflict).Hash.ToLowerInvariant()) 'remote conflict.txt has the remote content'
+        Assert ($remoteLongNode.activeRevision.claimedDigests.sha1 -eq (Get-FileHash -Algorithm SHA1 $remoteLong).Hash.ToLowerInvariant()) 'remote long-stem original has the remote content'
+
+        # Download the conflict copies back to prove the remote copies hold the local edits.
+        $verifyConflicts = Join-Path $verify 'conflicts'
+        New-Item -ItemType Directory -Force -Path $verifyConflicts | Out-Null
+        Invoke-Cli @('fs', 'download', "$remoteRoot/$($localConflictCopy[0].Name)", $verifyConflicts) | Out-Null
+        Invoke-Cli @('fs', 'download', "$remoteRoot/$longConflictName", $verifyConflicts) | Out-Null
+        Assert ((Get-Content -Raw (Join-Path $verifyConflicts $localConflictCopy[0].Name)) -eq "local conflict edit`n") 'remote conflict copy holds the local content'
+        Assert ((Get-Content -Raw (Join-Path $verifyConflicts $longConflictName)) -eq "local long-stem edit`n") 'remote long-stem conflict copy holds the local content'
+    }
+    else {
+        Write-Host 'Skipped keep-both conflict step (-SkipConflict).' -ForegroundColor Yellow
+    }
 
     Write-Host ""
     Write-Host "LIVE SMOKE PASSED" -ForegroundColor Green

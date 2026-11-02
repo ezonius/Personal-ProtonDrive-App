@@ -881,7 +881,7 @@ public static class CliApp
               --full              force a complete remote listing
               --force             override the deletion budget
               --cleanup-staged    run only: also trash adopted/historical staging leftovers
-              --limit <n>         history only: number of runs to show (1..500, default 20)
+              --limit <n>         maximum rows for listing commands (1..500, default 20)
               --json              machine-readable output
               --verbose           per-action output
               --yes               accept defaults; never overwrite existing files

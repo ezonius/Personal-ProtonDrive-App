@@ -120,7 +120,8 @@ public static class HistoryCommand
         {
             line += $"  planned {run.Planned.Actions} " +
                     $"(up {run.Planned.Uploads}, down {run.Planned.Downloads}, " +
-                    $"del {run.Planned.Deletions})";
+                    $"del {run.Planned.Deletions}, conflict {run.Planned.Conflicts}, " +
+                    $"adopt {run.Planned.Adoptions})";
         }
 
         if (run.Succeeded is not null)

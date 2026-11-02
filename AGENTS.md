@@ -358,7 +358,10 @@ Known gaps / likely next work:
   parsing these logs.
 - `rebuild` is implemented with explicit `--policy`.
 - S15 restore-by-UID is not wired (restore is not used by the sync engine yet).
-- Directory rename detection is not implemented; file renames are.
+- File and directory renames are implemented. A directory rename is applied as
+  one subtree move with a single state transaction; ambiguous, ignored-child,
+  and missing-destination-parent cases fall back to per-child behavior (SPEC
+  §5.4).
 - Desktop-app mapping detection is implemented for the Windows desktop app's
   known per-user/machine-wide `Mappings.json` locations; other platforms are a
   no-op because the app does not publish that file there.

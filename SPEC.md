@@ -589,6 +589,41 @@ adoption engine.
   (or a single move if the parent is unchanged). Ambiguous matches fall back to
   trash + upload.
 - Renames are **never** inferred from mtime alone.
+- **Directory renames** are detected in both directions and applied as one
+  subtree move; the children never produce their own trash/upload actions.
+  - **Local-initiated.** Baseline directory P is gone from the local scan (its
+    whole local subtree is absent); a new local directory Q exists that is
+    absent from the baseline (including frozen rows) and the remote listing;
+    Q's subtree is an exact copy of P's baseline subtree (same relative child
+    paths, kinds, sizes and SHA-1s, no changed or extra local children); the
+    remote subtree at P is unchanged (same uids, no extra nodes); and Q's remote
+    parent already exists (the sync root counts). Exactly one candidate Q
+    applies. Zero or several candidates fall back to today's per-child
+    behaviour; a destination whose remote parent is missing is treated as
+    ambiguous rather than emitting a move that would fail halfway.
+  - **Remote-initiated.** The baseline directory uid disappears from its old
+    path and reappears as a directory at a new remote path. The local subtree at
+    the old path must be unchanged and the new remote subtree must be the
+    baseline subtree moved (same relative paths, kinds and uids, no extra
+    nodes); then the local directory is moved as one unit. A changed local
+    subtree is a blocking `rename` conflict; a locally missing directory falls
+    back to normal remote-only handling. A destination that already exists
+    locally or in the baseline is a blocking conflict.
+  - **CLI calls.** A same-parent rename is a single `fs rename`. A cross-parent
+    move is `fs move <P> <parent(Q)>` followed by `fs rename
+    <parent(Q)/<nameP>> <nameQ>` when the leaf also changed. State rewrites
+    every descendant `entries` row to the Q prefix inside the same transaction
+    as the pending row; `remote_uid`, `remote_rev_uid`, sha1s, sizes and
+    `frozen` flags are preserved.
+  - **Ignored and skipped paths.** A directory move is detected only when the old
+    and new subtrees contain no ignored or skipped path in any snapshot; an
+    ignored child would otherwise be smuggled along by the move. Such a rename
+    falls back to today's per-child behaviour.
+  - **Nesting.** Only the topmost directory of a moved subtree emits an action;
+    descendants and file-rename candidates inside the old/new prefixes are
+    claimed by that move.
+  - Detection is disabled when `detectRenames` is false, when either scan is
+    incomplete, and in a skipped/fast-mode remote subtree.
 
 #### 5.4.1 Case handling: folded identity, casing is local
 
@@ -607,8 +642,10 @@ Rules:
    the same `path_key`, the sync aborts before executing any action, listing the
    colliding paths and suggesting a rename. We never "pick one and delete the
    other". This applies to local and remote scans equally.
-4. Directories behave like files: a case-only directory rename is a no-op and
-   does not rewrite descendant keys (they are already folded).
+4. Directories behave like files for casing: a case-only directory rename is a
+   no-op and does not rewrite descendant keys (they are already folded). A
+   genuine (non-case) directory rename is a single subtree move per §5.4, never
+   a per-child rewrite.
 
 Consequence worth spelling out: after a case-only local rename, a later content
 edit must still target the existing remote node (`name.txt`). `fs upload` uses
@@ -1320,6 +1357,7 @@ v1 ships at M4; M5 is the "leave it running" bar.
 | Conflict-name format | Keep `stem (conflict YYYY-MM-DD HHMMSS).ext`. Verified live on 2026-11-02: the real account accepts the parentheses, spaces and timestamp, and `fs list`/`fs download` round-trip the name byte-for-byte, so no spike is needed. Added a leaf-length guard: the stem is truncated when the produced name would exceed 255 characters or 255 UTF-8 bytes, while the extension and the conflict suffix are preserved; an extension with no room fails the plan before any write. | §5.2, `Planner.BuildConflictPath`, #15 |
 | `verify.samplePercent` default | **100**. Sample mode only covers uploads whose remote digest is missing — exactly the transfers the listing cannot verify — and pdsync uploads always carry a digest, so the case is rare and auditing all of it is cheap. At 100% the `minSizeMb` gate is bypassed; lower values still sample deterministically and stay size-gated. | §6.5, D15, #15 |
 | `doctor` and Task Scheduler | `doctor` **prints** the verified `schtasks` command and points at `docs/runbook.md`; it never registers a scheduled task or otherwise mutates the OS, consistent with the read-only contract. | §3.1, §9, `docs/runbook.md`, #15 |
+| Directory-rename ambiguity and ignored children | A directory move is applied only with exactly one exact candidate. Zero/multiple candidates, an ignored or skipped descendant, or a destination whose remote parent is absent fall back to today's per-child trash/upload; nested renames collapse to the topmost move. This keeps the v1 rule bounded and makes a wrong move impossible rather than merely unlikely. | §5.4, #10 |
 
 No open decisions remain in this section.
 

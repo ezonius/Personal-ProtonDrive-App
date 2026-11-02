@@ -924,6 +924,8 @@ public static class CliApp
             PlanActionKind.KeepBothUpload => $"upload conflict copy {action.Path}",
             PlanActionKind.RemoteMove => $"move remote {action.Path} -> {action.SecondaryPath}",
             PlanActionKind.LocalMove => $"move local {action.Path} -> {action.SecondaryPath}",
+            PlanActionKind.RemoteDirectoryMove => $"move remote directory {action.Path} -> {action.SecondaryPath}",
+            PlanActionKind.LocalDirectoryMove => $"move local directory {action.Path} -> {action.SecondaryPath}",
             PlanActionKind.LocalTrash => $"trash local {action.Path}",
             PlanActionKind.RemoteTrash => $"trash remote {action.Path}",
             PlanActionKind.CleanupStagedUpload => $"cleanup staged upload {action.Path}",

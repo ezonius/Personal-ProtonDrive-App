@@ -997,9 +997,12 @@ public sealed class CliFakeTests
     [InlineData("doctor")]
     public void LowerMinVersionOverride_AllowsDetectedCli(string command)
     {
+        // Deliberately below the built-in 0.9.0 default: 0.8.5 only passes if
+        // the configured 0.8.0 override is honored. If the default leaked
+        // through, the gate would reject 0.8.5 and this test would fail.
         using var fixture = new Fixture(minVersion: "0.8.0");
         fixture.SeedRoot();
-        fixture.Fake("__fake", "set-version", "0.9.0");
+        fixture.Fake("__fake", "set-version", "0.8.5");
 
         var result = fixture.Cli(command);
 

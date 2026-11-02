@@ -397,7 +397,7 @@ public static class Planner
             return;
         }
 
-        ApplyBothModified(sync, context, key, l, r, actions, conflicts, conflictNames);
+        ApplyBothModified(sync, context, key, l, r, actions, conflicts, skipped, conflictNames);
     }
 
     private static void PlanLocalDelete(
@@ -708,6 +708,7 @@ public static class Planner
         RemoteEntry r,
         List<PlanAction> actions,
         List<PlanConflict> conflicts,
+        List<PlanSkip> skipped,
         HashSet<string> conflictNames)
     {
         switch (sync.Options.Conflict)
@@ -727,20 +728,83 @@ public static class Planner
                     "both sides changed; keeping both", PlanConflictKind.BothModified);
                 return;
             case ConflictPolicy.Ask:
+                if (TryApplyOverride(context, key, l, r, actions, conflicts, skipped, conflictNames))
+                    return;
+
                 if (context.Interactive)
                 {
                     conflicts.Add(new PlanConflict(l.Path, key, PlanConflictKind.BothModified, PlanResolution.Abort,
-                        "both sides changed; interactive resolution required", l.Mtime, r.ClaimedMtime));
+                        "both sides changed; interactive resolution required", l.Mtime, r.ClaimedMtime,
+                        LocalSize: l.Size, RemoteSize: r.Size, DigestsDiffer: DigestsDiffer(l, r)));
                     return;
                 }
                 EmitKeepBoth(context, key, l, r, actions, conflicts, conflictNames,
-                    "both sides changed; non-interactive ask falls back to keep-both", PlanConflictKind.BothModified);
+                    "both sides changed; non-interactive ask falls back to keep-both",
+                    PlanConflictKind.BothModified, askFallback: true);
                 return;
             case ConflictPolicy.NewerWins:
             default:
                 ResolveNewerWins(sync, context, key, l, r, actions, conflicts, conflictNames);
                 return;
         }
+    }
+
+    /// <summary>
+    /// Applies a CLI-supplied choice only for the <c>ask</c> policy. Keys absent
+    /// from the map keep the ordinary ask behavior. Returns false when nothing
+    /// was applied.
+    /// </summary>
+    private static bool TryApplyOverride(
+        PlanContext context,
+        string key,
+        LocalEntry l,
+        RemoteEntry r,
+        List<PlanAction> actions,
+        List<PlanConflict> conflicts,
+        List<PlanSkip> skipped,
+        HashSet<string> conflictNames)
+    {
+        if (context.ConflictOverrides is null ||
+            !context.ConflictOverrides.TryGetValue(key, out var resolution))
+        {
+            return false;
+        }
+
+        switch (resolution)
+        {
+            case PlanResolution.LocalWins:
+                actions.Add(Action(PlanActionKind.UploadRevision, l.Path,
+                    "conflict: interactive choice local wins", remoteUid: r.Uid));
+                conflicts.Add(new PlanConflict(l.Path, key, PlanConflictKind.BothModified,
+                    PlanResolution.LocalWins, "both sides changed; user chose local wins",
+                    l.Mtime, r.ClaimedMtime, l.Size, r.Size, DigestsDiffer(l, r)));
+                return true;
+            case PlanResolution.RemoteWins:
+                actions.Add(Action(PlanActionKind.DownloadReplace, l.Path,
+                    "conflict: interactive choice remote wins", remoteUid: r.Uid));
+                conflicts.Add(new PlanConflict(l.Path, key, PlanConflictKind.BothModified,
+                    PlanResolution.RemoteWins, "both sides changed; user chose remote wins",
+                    l.Mtime, r.ClaimedMtime, l.Size, r.Size, DigestsDiffer(l, r)));
+                return true;
+            case PlanResolution.KeepBoth:
+                EmitKeepBoth(context, key, l, r, actions, conflicts, conflictNames,
+                    "both sides changed; user chose keep-both", PlanConflictKind.BothModified);
+                return true;
+            case PlanResolution.Defer:
+                skipped.Add(new PlanSkip(l.Path, key, PlanSkipReason.Deferred,
+                    "conflict deferred by interactive choice; no action this run"));
+                return true;
+            default:
+                // Abort (or any unknown value) keeps the ordinary ask behavior.
+                return false;
+        }
+    }
+
+    private static bool? DigestsDiffer(LocalEntry l, RemoteEntry r)
+    {
+        if (string.IsNullOrEmpty(l.Sha1) || string.IsNullOrEmpty(r.Sha1))
+            return null;
+        return !string.Equals(l.Sha1, r.Sha1, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void ResolveNewerWins(
@@ -798,7 +862,8 @@ public static class Planner
         List<PlanConflict> conflicts,
         HashSet<string> conflictNames,
         string message,
-        PlanConflictKind kind)
+        PlanConflictKind kind,
+        bool askFallback = false)
     {
         var conflictPath = BuildConflictPath(l.Path, context.Now, conflictNames);
         var conflictKey = PathKey.Fold(conflictPath);
@@ -814,7 +879,9 @@ public static class Planner
             Reason: "upload the renamed local conflict copy"));
 
         conflicts.Add(new PlanConflict(l.Path, key, kind, PlanResolution.KeepBoth,
-            message, l.Mtime, r.ClaimedMtime));
+            message, l.Mtime, r.ClaimedMtime,
+            LocalSize: l.Size, RemoteSize: r.Size, DigestsDiffer: DigestsDiffer(l, r),
+            AskFallback: askFallback));
     }
 
     private static PlanConflict KindConflict(string path, string key, bool isLocalDirectory, bool isRemoteDirectory) =>

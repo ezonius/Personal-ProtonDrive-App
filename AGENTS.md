@@ -328,6 +328,11 @@ Implemented and fake-tested:
   `--sync`. Action totals come from `stats_json`; malformed/missing stats keep
   the row with a null summary. Read-only: no DB create/migrate, lock, logs, or
   Proton calls.
+- `run` interactive conflict prompting for `conflict: ask` (SPEC §5.2): TTY
+  only (no `--json`/`--yes`), one prompt per both-modified conflict with
+  `l`/`r`/`b`/`s`/`a` choices; the planner consumes the choices as pure
+  overrides and `SyncService` re-plans the prepared snapshots without a second
+  remote listing. Non-interactive runs keep the keep-both fallback.
 
 Live smoke: **passed** on 2026-10-31 against the real account using the script
 in §5. It covered push, pull, both deletion directions, ignore behavior, and
@@ -343,8 +348,6 @@ Known gaps / likely next work:
   available for per-action detail; `history` reads `runs.stats_json` instead of
   parsing these logs.
 - `rebuild` is implemented with explicit `--policy`.
-- Interactive conflict prompting is not implemented; `ask` currently uses the
-  non-interactive fallback.
 - S15 restore-by-UID is not wired (restore is not used by the sync engine yet).
 - Directory rename detection is not implemented; file renames are.
 - Desktop-app mapping detection is implemented for the Windows desktop app's

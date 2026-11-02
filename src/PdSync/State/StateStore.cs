@@ -103,7 +103,7 @@ public sealed class StateSchemaTooNewException : StateException
 /// </summary>
 public sealed class StateStore : IDisposable
 {
-    public const int SchemaVersion = 2;
+    public const int SchemaVersion = 1;
 
     private readonly SqliteConnection _connection;
     private SqliteTransaction? _transaction;
@@ -224,6 +224,9 @@ public sealed class StateStore : IDisposable
                 // An in-memory preview must never take the writable migration /
                 // backup path just because a file happens to exist on disk.
                 Migrate(connection, databasePath, existed && !inMemory);
+                // remote_trash is additive and created lazily so an existing v1
+                // DB keeps working, including in read-only plan/doctor paths.
+                EnsureRemoteTrashTable(connection);
             }
 
             var store = new StateStore(
@@ -373,8 +376,9 @@ public sealed class StateStore : IDisposable
     // ------------------------------------------------------------ remote trash
 
     /// <summary>
-    /// Records the node the executor just moved to Proton Trash. Called inside
-    /// the same transaction as the entry delete and the pending-row removal.
+    /// Records the node the executor is about to move to Proton Trash. The row
+    /// is committed before the CLI call because the remote side effect cannot be
+    /// rolled back with a local transaction.
     /// </summary>
     public void RecordRemoteTrash(
         string path,
@@ -406,6 +410,11 @@ public sealed class StateStore : IDisposable
     public RemoteTrashRecord? GetRemoteTrash(string pathKey)
     {
         ThrowIfDisposed();
+        // A v1 database created before this feature has no table; a read-only
+        // open must treat that as "no records" instead of failing.
+        if (!RemoteTrashTableExists())
+            return null;
+
         using var command = CreateCommand();
         command.CommandText = """
             SELECT path_key, path, remote_uid, trashed_at, run_id
@@ -429,6 +438,9 @@ public sealed class StateStore : IDisposable
     public void DeleteRemoteTrash(string pathKey)
     {
         ThrowIfDisposed();
+        if (!RemoteTrashTableExists())
+            return;
+
         using var command = CreateCommand();
         command.CommandText = "DELETE FROM remote_trash WHERE sync_id = $sync AND path_key = $key;";
         command.Parameters.AddWithValue("$sync", SyncId);
@@ -649,17 +661,7 @@ public sealed class StateStore : IDisposable
         {
             using var transaction = connection.BeginTransaction();
             CreateSchemaV1(connection, transaction);
-            CreateSchemaV2(connection, transaction);
-            SetUserVersion(connection, 2, transaction);
-            transaction.Commit();
-            return;
-        }
-
-        if (version == 1)
-        {
-            using var transaction = connection.BeginTransaction();
-            CreateSchemaV2(connection, transaction);
-            SetUserVersion(connection, 2, transaction);
+            SetUserVersion(connection, SchemaVersion, transaction);
             transaction.Commit();
             return;
         }
@@ -732,12 +734,16 @@ public sealed class StateStore : IDisposable
         command.ExecuteNonQuery();
     }
 
-    private static void CreateSchemaV2(SqliteConnection connection, SqliteTransaction transaction)
+    /// <summary>
+    /// Creates the additive <c>remote_trash</c> table without bumping
+    /// <c>user_version</c>: older v1 databases stay valid and read-only opens
+    /// keep working.
+    /// </summary>
+    private static void EnsureRemoteTrashTable(SqliteConnection connection)
     {
         using var command = connection.CreateCommand();
-        command.Transaction = transaction;
         command.CommandText = """
-            CREATE TABLE remote_trash (
+            CREATE TABLE IF NOT EXISTS remote_trash (
                 sync_id TEXT NOT NULL,
                 path_key TEXT NOT NULL,
                 path TEXT NOT NULL,
@@ -748,9 +754,17 @@ public sealed class StateStore : IDisposable
                 FOREIGN KEY (sync_id) REFERENCES syncs(id) ON DELETE CASCADE
             );
 
-            CREATE INDEX ix_remote_trash_sync ON remote_trash(sync_id);
+            CREATE INDEX IF NOT EXISTS ix_remote_trash_sync ON remote_trash(sync_id);
             """;
         command.ExecuteNonQuery();
+    }
+
+    private bool RemoteTrashTableExists()
+    {
+        using var command = CreateCommand();
+        command.CommandText =
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'remote_trash';";
+        return Convert.ToInt32(command.ExecuteScalar(), CultureInfo.InvariantCulture) > 0;
     }
 
     private static int ReadUserVersion(SqliteConnection connection)

@@ -9,9 +9,11 @@ using PdSync.State;
 namespace PdSync.Cli;
 
 /// <summary>
-/// <c>pdsync trash list|purge</c> (SPEC §3.1, §7, D11). Local-only: it reads or
-/// deletes under <c>&lt;stateDir&gt;/trash</c> and never opens a state DB, takes
-/// a run lock, or calls Proton.
+/// <c>pdsync trash</c> (SPEC §3.1, §6.2, §7, D11). <c>list</c> and <c>purge</c>
+/// are local-only: they read or delete under <c>&lt;stateDir&gt;/trash</c> and
+/// never open a state DB, take a run lock, or call Proton. <c>restore</c> is the
+/// one mutating subcommand: it opens the state DB, takes the sync's run lock,
+/// lists <c>/trash</c>, and calls <c>fs restore</c> for a uniquely named record.
 /// </summary>
 public static class TrashCommand
 {
@@ -248,6 +250,7 @@ public static class TrashCommand
         PdsyncConfig config,
         IReadOnlyList<string> syncNames,
         IReadOnlyList<string> rawPaths,
+        bool forget,
         bool json,
         TextWriter output,
         TextWriter error)
@@ -281,6 +284,24 @@ public static class TrashCommand
                 results.Add(new RestorePathResult(path, "missing",
                     $"no pdsync trash record for {path}", null));
                 exit = Math.Max(exit, 1);
+                continue;
+            }
+
+            if (forget)
+            {
+                // Local-only: drop the record without touching Proton.
+                state.DeleteRemoteTrash(pathKey);
+                results.Add(new RestorePathResult(path, "forgotten", null, null));
+                continue;
+            }
+
+            if (state.GetEntry(pathKey) is not null)
+            {
+                results.Add(new RestorePathResult(path, "active",
+                    $"path is active again in the sync; refusing to restore the old trashed node " +
+                    $"(clear the record with: pdsync trash restore --forget {path})",
+                    null));
+                exit = Math.Max(exit, 2);
                 continue;
             }
 
@@ -318,11 +339,53 @@ public static class TrashCommand
                 continue;
             }
 
-            state.InTransaction(() =>
+            try
             {
                 cli.Restore("/trash/" + leaf);
-                state.DeleteRemoteTrash(pathKey);
-            });
+            }
+            catch (ProtonAuthException)
+            {
+                throw;
+            }
+            catch (ProtonCliException ex)
+            {
+                // Keep the record: the node is still trashed and a later retry
+                // may succeed once the conflict is resolved.
+                results.Add(new RestorePathResult(path, "failed", ex.Message, null));
+                exit = Math.Max(exit, 1);
+                continue;
+            }
+
+            // A non-zero exit is not the only failure mode; prove the recorded
+            // node actually left /trash before deleting its only undo record.
+            IReadOnlyList<ProtonNode> after;
+            try
+            {
+                after = cli.List("/trash");
+            }
+            catch (ProtonAuthException)
+            {
+                throw;
+            }
+            catch (ProtonCliException ex)
+            {
+                results.Add(new RestorePathResult(path, "unverified",
+                    $"restore result could not be verified: {ex.Message}", null));
+                exit = Math.Max(exit, 1);
+                continue;
+            }
+
+            if (after.Any(node => string.Equals(node.Uid, record.RemoteUid, StringComparison.Ordinal)))
+            {
+                results.Add(new RestorePathResult(path, "unverified",
+                    $"recorded node {ShortUid(record.RemoteUid)} is still in /trash after restore; " +
+                    "keeping the record", null));
+                exit = Math.Max(exit, 1);
+                continue;
+            }
+
+            trash = after;
+            state.DeleteRemoteTrash(pathKey);
             results.Add(new RestorePathResult(path, "restored", null, null));
         }
 
@@ -337,6 +400,12 @@ public static class TrashCommand
             if (result.Status == "restored")
             {
                 output.WriteLine($"restored {result.Path}");
+                continue;
+            }
+
+            if (result.Status == "forgotten")
+            {
+                output.WriteLine($"forgot {result.Path}");
                 continue;
             }
 

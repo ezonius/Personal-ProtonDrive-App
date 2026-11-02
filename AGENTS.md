@@ -179,6 +179,9 @@ These are the easiest invariants to break. Check `SPEC.md` §2 for the full list
     `maxDeletePercent` exceeded → exit 6 before any deletion. `--force` bypasses.
 11. **One action = one pending journal row.** The pending row is written before
     the CLI call and removed inside the same transaction as the state commit.
+    A remote trash additionally writes its `remote_trash` undo record in its own
+    committed statement before `fs trash`; a local transaction cannot cover a
+    remote side effect, so the record survives a crash or a failed call.
 12. **Verification uses `claimedDigests.sha1` as a fingerprint, never as a
     security boundary.** Missing digest downgrades to size. `full` downloads
     uploads back; `sample` does so for missing digests (`samplePercent` defaults

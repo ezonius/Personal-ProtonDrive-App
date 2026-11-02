@@ -72,8 +72,9 @@ pdsync status [--json]           # last run per sync, pending conflicts
 pdsync ignore <path>             # explain which pattern matched (debug)
 pdsync trash list [--sync <name>] [--json]   # local trash inventory; never writes
 pdsync trash purge --older-than <days> [--dry-run] [--yes] [--sync <name>] [--json]
-pdsync trash restore <sync> <path...> [--json]
-                                  # undo a pdsync remote-trash action when the name is unique
+pdsync trash restore <sync> <path...> [--json] [--forget]
+                                  # undo a pdsync remote-trash action when the name is unique;
+                                  # --forget drops only the local undo record
 pdsync history [sync...] [--limit N] [--json]  # recent runs and action totals; never writes
 pdsync rebuild <sync> --policy=adopt|keep-both|local-wins|remote-wins
                                   # rebuild state from local+remote (last resort)
@@ -715,11 +716,15 @@ Notes:
   `Trashed node not found`, and `/trash/<uid>/<name>` is unsupported. Restore is
   name-only (`/trash/<name>`), and a duplicated name restores an arbitrary node
   without warning. pdsync therefore refuses to guess: the executor records
-  `(path, path_key, remote_uid, trashed_at, run_id)` for every remote trash
-  action, and `pdsync trash restore` restores only when the recorded leaf name
-  matches exactly one trashed node **and** its uid equals the recorded uid.
-  Ambiguity or a uid mismatch exits 2 and points at the Proton web app; pdsync
-  never falls back to permanent deletion.
+  `(path, path_key, remote_uid, trashed_at, run_id)` for **baseline-content**
+  remote deletions, and `pdsync trash restore` restores only when the recorded
+  leaf name matches exactly one trashed node **and** its uid equals the
+  recorded uid. Ambiguity or a uid mismatch exits 2 and points at the Proton web
+  app; pdsync never falls back to permanent deletion. Staging cleanup
+  (`--cleanup-staged`, `TryTrashUploadedNode`) and empty-folder pruning also use
+  Proton Trash but are deliberately **not** recorded and are not undoable.
+  Restore refuses with exit 2 while the path is active again in the sync; the
+  stale record can be dropped locally with `trash restore --forget <path>`.
 - Pass `--json` to every command. Upload JSON is only a counter:
   `{transferredItems, transferredBytes, skippedItems, failedItems, failures[]}` —
   it carries no revision or hash, so verification comes from a parent listing.
@@ -938,13 +943,21 @@ remote_trash(sync_id, path_key, path, remote_uid, trashed_at, run_id,
              PRIMARY KEY (sync_id, path_key))
 ```
 
-The `remote_trash` row is written in the same transaction as the executor's
-entry delete and pending-row removal, so a committed remote trash action always
-has a durable undo record. `pdsync trash restore` is the only reader; `plan`,
-`doctor`, and `trash list` never query it. Schema v2 adds this table; a v1 DB is
-migrated by the next writable open (`run`, `rebuild`, or `trash restore`) after
-the usual backup. Read-only opens of an older schema keep the existing warning
-behavior and are never migrated in place.
+The executor writes the `remote_trash` row in its own committed statement
+**before** calling `fs trash`, next to the `pending` journal row, and keeps it if
+the CLI call fails. A local transaction cannot cover a remote side effect: a
+crash after a successful `fs trash` but before the entry delete would otherwise
+lose the only undo record. A record left by a failed trash is harmless —
+`/trash` has no node with that leaf, so restore exits 2 and never guesses.
+`pdsync trash restore` verifies the recorded uid is gone from `/trash` before
+deleting the record and only deletes it after a verified success. It is the only
+reader of the table; `plan`, `doctor`, and `trash list` never query it.
+
+The table is additive and created lazily with `CREATE TABLE IF NOT EXISTS` on a
+writable open without changing `user_version`; this keeps an existing v1 DB
+working for `plan`/`doctor` and avoids disabling the read-only preview until a
+writable command runs. Read-only opens tolerate a missing table and treat it as
+"no records".
 
 Rules:
 
@@ -953,8 +966,8 @@ Rules:
   in-memory empty baseline; it never creates, migrates, or backs up a file.
   `doctor` also opens it read-only and warns when the schema is older than
   this build instead of migrating; a newer schema stays a failure there and in
-  `plan` (upgrade pdsync). Schema migration happens only in `run`, after copying
-  the DB to `state/backup-<date>.sqlite`.
+  `plan` (upgrade pdsync). Schema migration happens only in `run`, `rebuild`, or
+  `trash restore`, after copying the DB to `state/backup-<date>.sqlite`.
 - Every destructive or transfer action is preceded by a `pending` row and
   followed by a state update in the same transaction where possible.
 - On startup, `pending` rows are reconciled against current L/R (idempotent

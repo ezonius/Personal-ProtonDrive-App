@@ -352,13 +352,14 @@ public sealed class StateStoreTests : IDisposable
     }
 
     [Fact]
-    public void Open_MigratesV1SchemaAndCreatesRemoteTrash()
+    public void RemoteTrashTable_IsCreatedLazilyWithoutBumpingUserVersion()
     {
         var (config, sync) = CreateConfig();
         string path;
         using (var store = StateStore.Open(config, sync))
             path = store.DatabasePath;
 
+        // Simulate a v1 database written before remote_trash existed.
         using (var connection = new SqliteConnection($"Data Source={path};Pooling=False"))
         {
             connection.Open();
@@ -370,15 +371,41 @@ public sealed class StateStoreTests : IDisposable
             command.ExecuteNonQuery();
         }
 
-        using var migrated = StateStore.Open(config, sync);
-        migrated.RecordRemoteTrash("a.txt", "a.txt", "uid-2", 8);
-        migrated.GetRemoteTrash("a.txt")!.RemoteUid.Should().Be("uid-2");
+        // A read-only open tolerates the absent table and writes nothing.
+        using (var readOnly = StateStore.OpenReadOnly(config, sync))
+            readOnly.GetRemoteTrash("a.txt").Should().BeNull();
 
-        using var connection2 = new SqliteConnection($"Data Source={path};Pooling=False");
-        connection2.Open();
-        using var version = connection2.CreateCommand();
-        version.CommandText = "PRAGMA user_version;";
-        Convert.ToInt32(version.ExecuteScalar()).Should().Be(2);
+        TableExists(path, "remote_trash").Should().BeFalse("read-only opens never create it");
+        UserVersion(path).Should().Be(1);
+
+        // A writable open creates the table and keeps schema v1.
+        using (var writable = StateStore.Open(config, sync))
+        {
+            writable.RecordRemoteTrash("a.txt", "a.txt", "uid-2", 8);
+            writable.GetRemoteTrash("a.txt")!.RemoteUid.Should().Be("uid-2");
+        }
+
+        TableExists(path, "remote_trash").Should().BeTrue();
+        UserVersion(path).Should().Be(StateStore.SchemaVersion).And.Be(1);
+    }
+
+    private static bool TableExists(string databasePath, string name)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = $name;";
+        command.Parameters.AddWithValue("$name", name);
+        return Convert.ToInt32(command.ExecuteScalar()) > 0;
+    }
+
+    private static int UserVersion(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "PRAGMA user_version;";
+        return Convert.ToInt32(command.ExecuteScalar());
     }
 
     [Fact]

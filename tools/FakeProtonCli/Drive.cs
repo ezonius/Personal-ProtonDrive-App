@@ -151,9 +151,10 @@ public sealed class Drive
     }
 
     /// <summary>
-    /// Restore resolution mirrors the real CLI: an exact UID is accepted, and a
-    /// name is accepted by choosing the first match in trash order when it is
-    /// duplicated. pdsync itself refuses ambiguous names before calling this.
+    /// Restore resolution mirrors the real CLI 0.9.0 (S15): restore is
+    /// name-addressed only, and a duplicated name restores the first match in
+    /// trash order. <c>/trash/&lt;uid&gt;</c> is rejected ("Trashed node not
+    /// found"); pdsync itself refuses ambiguous names before calling this.
     /// </summary>
     public FakeNode? ResolveTrashForRestore(string path)
     {
@@ -162,10 +163,6 @@ public sealed class Drive
             return null;
 
         var key = segments[1];
-        var byUid = State.Nodes.FirstOrDefault(n => n.Trashed && n.Uid == key);
-        if (byUid is not null)
-            return byUid;
-
         return TrashedRoots().FirstOrDefault(n => n.Name == key);
     }
 

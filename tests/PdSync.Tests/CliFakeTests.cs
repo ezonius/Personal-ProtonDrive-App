@@ -1112,7 +1112,7 @@ public sealed class CliFakeTests
         var result = fixture.Cli("doctor");
 
         result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
-        result.Stdout.Should().Contain("warn sync docs state: State database schema v0 is not current (v2); run pdsync run to migrate it");
+        result.Stdout.Should().Contain("warn sync docs state: State database schema v0 is not current (v1); run pdsync run to migrate it");
         result.Stdout.Should().Contain("sync docs staged leftovers: skipped: state schema not current");
         result.Stdout.Split('\n').Count(line => line.StartsWith("warn ", StringComparison.Ordinal))
             .Should().Be(1, "one warning per sync, not one per probe");
@@ -1143,14 +1143,14 @@ public sealed class CliFakeTests
 
         doctor.ExitCode.Should().Be(1, doctor.Stdout + doctor.Stderr);
         doctor.Stdout.Should().Contain(
-            "FAIL sync docs state: State database schema v3 is newer than this build (v2); upgrade pdsync.");
+            "FAIL sync docs state: State database schema v3 is newer than this build (v1); upgrade pdsync.");
         doctor.Stdout.Should().NotContain("run pdsync run to migrate it");
         doctor.Stdout.Should().Contain("doctor: problems found");
 
         var plan = fixture.Cli("plan");
 
         plan.ExitCode.Should().NotBe(0, plan.Stdout + plan.Stderr);
-        plan.Stderr.Should().Contain("State database schema v3 is newer than this build (v2)");
+        plan.Stderr.Should().Contain("State database schema v3 is newer than this build (v1)");
         plan.Stderr.Should().Contain("upgrade pdsync");
     }
 
@@ -2081,8 +2081,12 @@ public sealed class CliFakeTests
         restore.ExitCode.Should().Be(0, restore.Stdout + restore.Stderr);
         restore.Stdout.Should().Contain("restored a.txt");
         fixture.IsTrashed("/my-files/root/a.txt").Should().BeFalse();
-        using var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single());
-        state.GetRemoteTrash("a.txt").Should().BeNull();
+        using (var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single()))
+            state.GetRemoteTrash("a.txt").Should().BeNull();
+
+        var second = fixture.Cli("trash", "restore", "docs", "a.txt");
+        second.ExitCode.Should().Be(1, second.Stdout + second.Stderr);
+        second.Stderr.Should().Contain("no pdsync trash record for a.txt");
     }
 
     [Fact]
@@ -2191,6 +2195,215 @@ public sealed class CliFakeTests
         var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
 
         restore.ExitCode.Should().Be(5, restore.Stdout + restore.Stderr);
+    }
+
+    [Fact]
+    public void TrashRestore_RestoreFailureKeepsRecordAndPrintsNoRestoredLine()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("keep.txt", "keep");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        File.Delete(fixture.LocalFull("a.txt"));
+        fixture.Cli("run", "--force").ExitCode.Should().Be(0);
+        fixture.IsTrashed("/my-files/root/a.txt").Should().BeTrue();
+        var trashedUid = fixture.Nodes()["/my-files/root/a.txt"].GetProperty("uid").GetString()!;
+
+        // A new active node with the same name makes `fs restore` fail with a
+        // name conflict (the real CLI refuses to restore over it).
+        var source = fixture.Temp.Write("reinject/a.txt", "new content");
+        fixture.Fake("fs", "upload", "--json", source, "/my-files/root");
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        restore.ExitCode.Should().Be(1, restore.Stdout + restore.Stderr);
+        restore.Stdout.Should().NotContain("restored a.txt");
+        restore.Stderr.Should().Contain("already exists");
+        fixture.IsUidTrashed(trashedUid).Should().BeTrue("the node is still in Proton Trash");
+        using (var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single()))
+            state.GetRemoteTrash("a.txt").Should().NotBeNull("the undo record survives a failed restore");
+    }
+
+    [Fact]
+    public void TrashRestore_ActivePathRefusesAndForgetClearsTheRecord()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("keep.txt", "keep");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        File.Delete(fixture.LocalFull("a.txt"));
+        fixture.Cli("run", "--force").ExitCode.Should().Be(0);
+        var trashedUid = fixture.Nodes()["/my-files/root/a.txt"].GetProperty("uid").GetString()!;
+
+        // Simulate a record left over from before the path was re-synced: the
+        // entry is active again while the undo record still exists.
+        using (var state = StateStore.Open(fixture.Config, fixture.Config.Syncs.Single()))
+        {
+            state.UpsertEntry(new EntryRecord(
+                "a.txt", "a.txt", EntryKind.File, 4, 0, "sha1", "new-uid",
+                null, null, null, null, true, true, false, DateTimeOffset.UtcNow));
+        }
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        restore.ExitCode.Should().Be(2, restore.Stdout + restore.Stderr);
+        restore.Stderr.Should().Contain("active again");
+        restore.Stderr.Should().Contain("--forget a.txt");
+        fixture.IsUidTrashed(trashedUid).Should().BeTrue();
+
+        var restoresBefore = fixture.InvocationCount("restore");
+        var forget = fixture.Cli("trash", "restore", "docs", "a.txt", "--forget");
+
+        forget.ExitCode.Should().Be(0, forget.Stdout + forget.Stderr);
+        forget.Stdout.Should().Contain("forgot a.txt");
+        fixture.InvocationCount("restore").Should().Be(restoresBefore, "--forget is local-only");
+        fixture.IsUidTrashed(trashedUid).Should().BeTrue();
+        using (var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single()))
+            state.GetRemoteTrash("a.txt").Should().BeNull();
+    }
+
+    [Fact]
+    public void Trash_ReSyncedPathDropsTheStaleUndoRecord()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("keep.txt", "keep");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        File.Delete(fixture.LocalFull("a.txt"));
+        fixture.Cli("run", "--force").ExitCode.Should().Be(0);
+        using (var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single()))
+            state.GetRemoteTrash("a.txt").Should().NotBeNull();
+
+        fixture.WriteLocal("a.txt", "recreated");
+        var run = fixture.Cli("run");
+
+        run.ExitCode.Should().Be(0, run.Stdout + run.Stderr);
+        using (var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single()))
+            state.GetRemoteTrash("a.txt").Should().BeNull("the path is active again");
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+        restore.ExitCode.Should().Be(1, restore.Stdout + restore.Stderr);
+        restore.Stderr.Should().Contain("no pdsync trash record for a.txt");
+    }
+
+    [Fact]
+    public void Trash_RecordSurvivesPostTrashPreCommitState()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("keep.txt", "keep");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        var uid = fixture.Nodes()["/my-files/root/a.txt"].GetProperty("uid").GetString()!;
+
+        // The remote side effect happened and the pre-CLI undo record was
+        // committed, but the run crashed before the entry delete committed.
+        fixture.Fake("fs", "trash", "/my-files/root/a.txt");
+        File.Delete(fixture.LocalFull("a.txt"));
+        using (var state = StateStore.Open(fixture.Config, fixture.Config.Syncs.Single()))
+            state.RecordRemoteTrash("a.txt", "a.txt", uid, 0);
+
+        var run = fixture.Cli("run", "--force");
+
+        run.ExitCode.Should().Be(0, run.Stdout + run.Stderr);
+        using (var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single()))
+            state.GetRemoteTrash("a.txt").Should().NotBeNull("the next run must not drop the undo record");
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        restore.ExitCode.Should().Be(0, restore.Stdout + restore.Stderr);
+        fixture.IsUidTrashed(uid).Should().BeFalse();
+        using (var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single()))
+            state.GetRemoteTrash("a.txt").Should().BeNull();
+    }
+
+    [Fact]
+    public void Trash_FailedTrashLeavesARecordThatRestoreRefusesToGuess()
+    {
+        using var fixture = new Fixture(safety: "maxDeletes: 10\n      maxDeletePercent: 100");
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.WriteLocal("keep.txt", "keep");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        var scenario = fixture.Temp.Write("scenario.json", """
+            { "rules": [ { "match": "fs trash", "times": 1, "exitCode": 1, "stderr": "injected trash failure" } ] }
+            """);
+        fixture.Fake("__fake", "scenario", scenario);
+
+        File.Delete(fixture.LocalFull("a.txt"));
+        var run = fixture.Cli("run");
+
+        run.ExitCode.Should().Be(1, run.Stdout + run.Stderr);
+        using (var state = StateStore.OpenReadOnly(fixture.Config, fixture.Config.Syncs.Single()))
+            state.GetRemoteTrash("a.txt").Should().NotBeNull("the record is kept when the CLI call fails");
+
+        var restore = fixture.Cli("trash", "restore", "docs", "a.txt");
+
+        // The failed trash left the entry active, so the restored-path guard
+        // refuses; no candidate was trashed and nothing is guessed.
+        restore.ExitCode.Should().Be(2, restore.Stdout + restore.Stderr);
+        restore.Stderr.Should().Contain("refusing to restore the old trashed node");
+        restore.Stdout.Should().NotContain("restored a.txt");
+    }
+
+    [Fact]
+    public void Fake_RestoreByUidIsRejectedLikeTheRealCli()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+        var uid = fixture.Nodes()["/my-files/root/a.txt"].GetProperty("uid").GetString()!;
+
+        fixture.Fake("fs", "trash", "/my-files/root/a.txt");
+        var restore = fixture.FakeResult("fs", "restore", "/trash/" + uid);
+
+        restore.ExitCode.Should().NotBe(0, "the real CLI (S15) rejects /trash/<uid>");
+        restore.Stderr.Should().Contain("Node not found");
+        fixture.IsUidTrashed(uid).Should().BeTrue();
+    }
+
+    [Fact]
+    public void Plan_V1DatabaseWithoutRemoteTrashWorksWithoutWriting()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Cli("run").ExitCode.Should().Be(0);
+
+        using (var connection = new SqliteConnection($"Data Source={fixture.DbPath()};Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "DROP TABLE remote_trash;";
+            command.ExecuteNonQuery();
+        }
+
+        var hashBefore = SHA256.HashData(File.ReadAllBytes(fixture.DbPath()));
+        var mtimeBefore = File.GetLastWriteTimeUtc(fixture.DbPath());
+
+        var plan = fixture.Cli("plan");
+
+        plan.ExitCode.Should().Be(0, plan.Stdout + plan.Stderr);
+        SHA256.HashData(File.ReadAllBytes(fixture.DbPath())).Should().Equal(hashBefore);
+        File.GetLastWriteTimeUtc(fixture.DbPath()).Should().Be(mtimeBefore);
+
+        using var connection2 = new SqliteConnection($"Data Source={fixture.DbPath()};Pooling=False");
+        connection2.Open();
+        using var version = connection2.CreateCommand();
+        version.CommandText = "PRAGMA user_version;";
+        Convert.ToInt32(version.ExecuteScalar()).Should().Be(1);
+
+        using var table = connection2.CreateCommand();
+        table.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'remote_trash';";
+        Convert.ToInt32(table.ExecuteScalar()).Should().Be(0);
     }
 
     private sealed class Fixture : IDisposable
@@ -2361,6 +2574,15 @@ public sealed class CliFakeTests
 
         public string Fake(params string[] args)
         {
+            var result = FakeResult(args);
+            if (result.ExitCode != 0)
+                throw new InvalidOperationException(
+                    $"fake CLI failed ({result.ExitCode}): {result.Stdout}\n{result.Stderr}");
+            return result.Stdout;
+        }
+
+        public CliResult FakeResult(params string[] args)
+        {
             var psi = new ProcessStartInfo(_fakeExe)
             {
                 RedirectStandardOutput = true,
@@ -2378,9 +2600,15 @@ public sealed class CliFakeTests
             var stdout = process.StandardOutput.ReadToEnd();
             var stderr = process.StandardError.ReadToEnd();
             process.WaitForExit();
-            if (process.ExitCode != 0)
-                throw new InvalidOperationException($"fake CLI failed ({process.ExitCode}): {stdout}\n{stderr}");
-            return stdout;
+            return new CliResult(process.ExitCode, stdout, stderr);
+        }
+
+        public bool IsUidTrashed(string uid)
+        {
+            using var document = JsonDocument.Parse(Fake("__fake", "dump"));
+            return document.RootElement.GetProperty("nodes").EnumerateArray().Any(node =>
+                node.GetProperty("uid").GetString() == uid &&
+                node.TryGetProperty("trashTime", out _));
         }
 
         public IReadOnlyDictionary<string, JsonElement> Nodes()

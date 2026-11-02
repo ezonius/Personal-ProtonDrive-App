@@ -259,7 +259,8 @@ public sealed class ProtonCli
     /// </summary>
     public void Restore(string trashPath)
     {
-        Run(ProtonCallKind.NonReplayable, "fs", "restore", EscapePath(trashPath));
+        var result = Run(ProtonCallKind.NonReplayable, "fs", "restore", EscapePath(trashPath));
+        EnsureSuccess(result, trashPath);
     }
 
     private IReadOnlyList<ProtonNode> ListRemote(string remotePath)
@@ -412,7 +413,12 @@ public sealed class ProtonCli
         ProtonFailureKind.Transient,
         result.Attempts);
 
-    private static JsonDocument ParseJson(CliResult result, string remotePath)
+    /// <summary>
+    /// Turns a non-success CLI result into the matching exception before any
+    /// JSON is required. Commands that do not emit JSON (for example
+    /// <c>fs restore</c>) still must not treat a failed process as success.
+    /// </summary>
+    private static void EnsureSuccess(CliResult result, string target)
     {
         if (result.ExitCode == 3)
         {
@@ -432,7 +438,7 @@ public sealed class ProtonCli
         if (result.TimedOut)
         {
             throw new ProtonCliException(
-                $"timed out after {result.Elapsed.TotalSeconds:0.#}s operating on {remotePath} " +
+                $"timed out after {result.Elapsed.TotalSeconds:0.#}s operating on {target} " +
                 $"(after {result.Attempts} attempt(s))",
                 result.Args,
                 result.ExitCode,
@@ -444,7 +450,12 @@ public sealed class ProtonCli
         }
 
         if (result.ExitCode != 0)
-            throw CommandFailure(result, remotePath);
+            throw CommandFailure(result, target);
+    }
+
+    private static JsonDocument ParseJson(CliResult result, string remotePath)
+    {
+        EnsureSuccess(result, remotePath);
 
         try
         {

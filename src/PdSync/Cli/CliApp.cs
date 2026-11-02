@@ -823,7 +823,7 @@ public static class CliApp
             }
 
             return TrashCommand.ExecuteRestore(
-                config, syncNames, restorePaths, args.Json, output, error);
+                config, syncNames, restorePaths, args.Forget, args.Json, output, error);
         }
 
         return args.Subcommand == "list"
@@ -838,7 +838,9 @@ public static class CliApp
         if (args.Subcommand is not ("list" or "purge" or "restore"))
             return "trash requires a subcommand: list, purge, or restore";
         if (args.Fast || args.Full || args.Force || args.Interactive)
-            return "trash accepts only --config, --sync, --json, --verbose, --yes, --dry-run, --older-than, and --no-color";
+            return "trash accepts only --config, --sync, --json, --verbose, --yes, --dry-run, --older-than, --forget, and --no-color";
+        if (args.Forget && args.Subcommand != "restore")
+            return "--forget is only valid with trash restore";
         if (args.UnexpectedPositional)
             return "trash does not accept positional arguments; use --sync <name>";
         if (args.Subcommand == "list" && (args.OlderThanDays is not null || args.DryRun || args.Yes))
@@ -848,7 +850,7 @@ public static class CliApp
         if (args.Subcommand == "restore")
         {
             if (args.OlderThanDays is not null || args.DryRun || args.Yes)
-                return "trash restore accepts only --config, --sync, --json, --verbose, and --no-color";
+                return "trash restore accepts only --config, --sync, --json, --verbose, --forget, and --no-color";
             if (args.RestoreArguments.Count == 0)
                 return "trash restore requires <sync> <path...>";
             if (args.SyncNames.Count == 0 && args.RestoreArguments.Count < 2)
@@ -1003,8 +1005,9 @@ public static class CliApp
               trash list          list local trash runs; never writes
               trash purge --older-than <days> [--dry-run] [--yes]
                                   delete whole trash run directories (manual only)
-              trash restore <sync> <path...> [--json]
-                                  undo a pdsync remote trash action when the name is unique
+              trash restore <sync> <path...> [--json] [--forget]
+                                  undo a pdsync remote trash action when the name is unique;
+                                  --forget only drops the local undo record
               rebuild <sync> --policy=<p> [--yes] [--dry-run]
                                   rebuild state from local+remote (last resort)
 
@@ -1035,6 +1038,7 @@ public static class CliApp
         public bool Verbose { get; private set; }
         public bool Interactive { get; private set; }
         public bool CleanupStaged { get; private set; }
+        public bool Forget { get; private set; }
         public bool Yes { get; private set; }
         public bool ShowHelp { get; private set; }
         public bool DryRun { get; private set; }
@@ -1095,6 +1099,9 @@ public static class CliApp
                         break;
                     case "--dry-run":
                         result.DryRun = true;
+                        break;
+                    case "--forget":
+                        result.Forget = true;
                         break;
                     case "--older-than":
                         result.OlderThanDays = ParseDays(Next(args, ref i, "--older-than"));

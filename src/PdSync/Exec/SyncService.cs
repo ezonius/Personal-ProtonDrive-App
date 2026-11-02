@@ -76,6 +76,21 @@ public static class SyncService
             cleanupStaged: false);
     }
 
+    /// <summary>
+    /// Plans a rebuild against an empty baseline without opening the existing
+    /// state DB. The caller supplies a sync whose <c>initialSync</c> policy has
+    /// already been overridden for this operation.
+    /// </summary>
+    public static PreparedSync PrepareForRebuildPreview(
+        PdsyncConfig config,
+        SyncConfig sync)
+    {
+        return Prepare(
+            config, sync, readOnly: true, fastRequested: false, fullRequested: true,
+            interactive: false, cleanupStaged: false,
+            baselineOverride: Array.Empty<EntryRecord>(), emptyState: true);
+    }
+
     public static SyncAttempt Run(
         PdsyncConfig config,
         SyncConfig sync,
@@ -194,15 +209,19 @@ public static class SyncService
         bool fastRequested,
         bool fullRequested,
         bool interactive,
-        bool cleanupStaged)
+        bool cleanupStaged,
+        IReadOnlyList<EntryRecord>? baselineOverride = null,
+        bool emptyState = false)
     {
-        var state = readOnly
-            ? StateStore.OpenReadOnly(config, sync)
-            : StateStore.Open(config, sync);
+        var state = emptyState
+            ? StateStore.OpenEmpty(config, sync)
+            : readOnly
+                ? StateStore.OpenReadOnly(config, sync)
+                : StateStore.Open(config, sync);
 
         try
         {
-            var baseline = state.LoadEntries(includeFrozen: true);
+            var baseline = baselineOverride ?? state.LoadEntries(includeFrozen: true);
             var cli = new ProtonCli(config.Proton.Cli);
 
             var ignore = IgnoreRules.Load(sync);

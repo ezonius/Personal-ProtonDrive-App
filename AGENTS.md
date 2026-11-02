@@ -45,11 +45,11 @@ pwsh -NoProfile -File tools/live-smoke.ps1
 ```
 
 `--fast`, `--full`, `--force`, `--cleanup-staged` (run only), `--json`,
-`--verbose`, `--interactive`, `--yes`, `--no-color`, `--config`, and `--sync`
-are recognized. `init`, `plan`,
-`run`, `doctor`, `status`, and `ignore` are implemented; `history` and
-`rebuild` are not. `ignore` reports the deciding rule for a path and is
-read-only.
+`--verbose`, `--interactive`, `--yes`, `--no-color`, `--config`, `--sync`,
+`--dry-run`, and `--policy` (rebuild only) are recognized. `init`, `plan`,
+`run`, `doctor`, `status`, `ignore`, `trash`, `init`, and `rebuild` are
+implemented; `history` is not. `ignore` reports the deciding rule for a path
+and is read-only.
 
 ### Agent role skills
 
@@ -86,6 +86,7 @@ src/PdSync/
   Cli/CliApp.cs              argument parsing, command handlers, human/JSON output
   Cli/InitCommand.cs         `init`: prompts, generated config/.pdignore, no-overwrite
   Cli/TrashCommand.cs        `trash list|purge`: local retention, read-only list
+  Cli/RebuildCommand.cs      `rebuild`: explicit-policy baseline recovery, backup/lock/confirm
   Diagnostics/
     DesktopMappingDetector.cs  read-only Proton Drive desktop-app Mappings.json probe
   Config/
@@ -334,7 +335,8 @@ Known gaps / likely next work:
   exhaustion, permanent failures, auth, and timeout recovery.
 - `logDir` JSONL run/action/verification logging is implemented; `history`
   does not read it yet.
-- `history` and `rebuild` are not implemented.
+- `history` is not implemented; `rebuild` is implemented with explicit
+  `--policy`.
 - Interactive conflict prompting is not implemented; `ask` currently uses the
   non-interactive fallback.
 - S15 restore-by-UID is not wired (restore is not used by the sync engine yet).

@@ -924,13 +924,121 @@ public sealed class CliFakeTests
         Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
     }
 
+    [Fact]
+    public void Doctor_OldCliFailsWithFailingCheck()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.Fake("__fake", "set-version", "0.8.5");
+
+        var result = fixture.Cli("doctor");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("proton-drive: Fake Proton Drive CLI 0.8.5");
+        result.Stdout.Should().Contain("FAIL proton-drive version:");
+        result.Stdout.Should().Contain("older than proton.minVersion 0.9.0");
+        result.Stdout.Should().Contain("doctor: problems found");
+    }
+
+    [Fact]
+    public void Plan_OldCliFailsWithoutCreatingState()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Fake("__fake", "set-version", "0.8.5");
+
+        var result = fixture.Cli("plan");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("proton-drive 0.8.5").And.Contain("older than proton.minVersion 0.9.0");
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        fixture.InvocationCount("list").Should().Be(0);
+    }
+
+    [Fact]
+    public void Run_OldCliFailsBeforeLockStateOrLogs()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Fake("__fake", "set-version", "0.8.5");
+
+        var result = fixture.Cli("run");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("older than proton.minVersion 0.9.0");
+        Directory.Exists(Path.Combine(fixture.StateDir, "locks")).Should().BeFalse();
+        Directory.Exists(Path.Combine(fixture.StateDir, "state")).Should().BeFalse();
+        Directory.Exists(Path.Combine(fixture.StateDir, "logs")).Should().BeFalse();
+        fixture.InvocationCount("upload").Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("0.9.0")]
+    [InlineData("0.9.1")]
+    [InlineData("1.0.0")]
+    public void Plan_EqualOrNewerCliPasses(string version)
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.WriteLocal("a.txt", "alpha");
+        fixture.Fake("__fake", "set-version", version);
+
+        var result = fixture.Cli("plan");
+
+        result.ExitCode.Should().Be(0, result.Stdout + result.Stderr);
+        result.Stdout.Should().Contain("upload new a.txt");
+    }
+
+    [Fact]
+    public void Plan_RaisedMinVersionRejectsDefaultCli()
+    {
+        using var fixture = new Fixture(minVersion: "1.0.0");
+        fixture.SeedRoot();
+
+        var result = fixture.Cli("plan");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("older than proton.minVersion 1.0.0");
+    }
+
+    [Fact]
+    public void Plan_UnparsableCliVersionFailsClosed()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        fixture.Fake("__fake", "set-version", "not-a-version");
+
+        var result = fixture.Cli("plan");
+
+        result.ExitCode.Should().Be(1, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("cannot verify the CLI version")
+            .And.Contain("proton.minVersion is 0.9.0");
+    }
+
+    [Fact]
+    public void MalformedMinVersion_ReturnsConfigExit4()
+    {
+        using var fixture = new Fixture();
+        fixture.SeedRoot();
+        var yaml = File.ReadAllText(fixture.ConfigPath)
+            .Replace("proton:", "proton:\n  minVersion: \"not-a-version\"", StringComparison.Ordinal);
+        File.WriteAllText(fixture.ConfigPath, yaml);
+
+        var result = fixture.Cli("plan");
+
+        result.ExitCode.Should().Be(4, result.Stdout + result.Stderr);
+        result.Stderr.Should().Contain("proton.minVersion").And.Contain("not-a-version");
+    }
+
     private sealed class Fixture : IDisposable
     {
         private readonly TempDirectory _temp = new();
         private readonly string? _oldState;
         private readonly string _fakeExe;
 
-        public Fixture(string? defaults = null, string? safety = null, string? exclude = null)
+        public Fixture(string? defaults = null, string? safety = null, string? exclude = null, string? minVersion = null)
         {
             _oldState = Environment.GetEnvironmentVariable("PDSYNC_FAKE_STATE");
             Local = _temp.Combine("local");
@@ -947,11 +1055,13 @@ public sealed class CliFakeTests
             var defaultBlock = defaults is null ? string.Empty : defaults;
             var safetyBlock = safety is null ? string.Empty : $"  safety:\n      {safety}";
             var excludeBlock = exclude is null ? string.Empty : $"exclude:\n  - \"{exclude}\"";
+            var minVersionBlock = minVersion is null ? string.Empty : $"  minVersion: \"{minVersion}\"";
             var yaml = $"""
                 version: 1
                 stateDir: "{_temp.YamlPath("state")}"
                 proton:
                   cli: "{_fakeExe.Replace('\\', '/')}"
+                {minVersionBlock}
                 defaults:
                   settleSeconds: 0
                 {Indent(defaultBlock, 2)}

@@ -99,6 +99,7 @@ src/PdSync/
     RemotePath.cs            POSIX remote path codec + validation
     RemoteSnapshot.cs        remote tree snapshot, uid/path lookups
     StagedUpload.cs          exact staged-upload name grammar + generation
+    CliVersion.cs            tolerant cli --version parsing + minVersion gate
   Remote/
     RemoteIndex.cs           BFS remote listing; fast-mode baseline synthesis
     FastRemoteScan.cs        subtree skip predicate + fast/full run counter
@@ -195,6 +196,7 @@ __fake dump
 __fake log
 __fake path
 __fake set-auth on|off
+__fake set-version <version>
 __fake scenario <scenario.json>
 __fake clear-scenario
 ```

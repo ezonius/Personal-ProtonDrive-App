@@ -71,7 +71,7 @@ internal static class Program
 
         if (args[0] is "--version" or "-v")
         {
-            Console.WriteLine("Fake Proton Drive CLI 0.9.0 (pdsync fake)");
+            Console.WriteLine($"Fake Proton Drive CLI {store.State.Version ?? "0.9.0"} (pdsync fake)");
             return 0;
         }
 
@@ -134,6 +134,13 @@ internal static class Program
                 store.Save();
                 return 0;
 
+            case "set-version":
+                if (args.Length < 2 || string.IsNullOrWhiteSpace(args[1]))
+                    return Fail("Usage: __fake set-version <version>");
+                store.State.Version = args[1];
+                store.Save();
+                return 0;
+
             case "scenario":
                 if (args.Length < 2)
                     return Fail("Usage: __fake scenario <scenario.json>");
@@ -157,6 +164,8 @@ internal static class Program
 
         var state = StateStore.NewState();
         state.Auth = manifest.Auth;
+        // Seeding replaces the tree, not the harness-wide version override.
+        state.Version = store.State.Version;
         var drive = new Drive(state);
 
         foreach (var seed in manifest.Nodes)
@@ -241,6 +250,7 @@ internal static class Program
               __fake log
               __fake path
               __fake set-auth on|off
+              __fake set-version <version>
               __fake scenario <scenario.json>
               __fake clear-scenario
             """);

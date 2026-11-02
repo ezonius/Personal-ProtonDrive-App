@@ -86,6 +86,17 @@ public static class CliApp
             }
 
             var config = ConfigLoader.Load(parsed.ConfigPath);
+
+            // plan/run fail before doing any work (and run before taking the
+            // lock or touching state) when the CLI is too old. doctor runs the
+            // same gate inline so it can report it as a failing check.
+            if (parsed.Command is "plan" or "run")
+            {
+                var versionExit = CheckProtonVersion(config, error);
+                if (versionExit != 0)
+                    return versionExit;
+            }
+
             return parsed.Command switch
             {
                 "plan" => Plan(config, parsed, output, error),
@@ -299,6 +310,13 @@ public static class CliApp
         {
             version = new ProtonCli(config.Proton.Cli).GetVersion();
             checks.Add(new DoctorCheck("proton-drive", true, version));
+
+            var gate = ProtonVersionGate.Evaluate(config.Proton.Cli, version, config.Proton.MinVersion);
+            if (!gate.Supported)
+            {
+                failed = true;
+                checks.Add(new DoctorCheck("proton-drive version", false, gate.Message!));
+            }
         }
         catch (ProtonAuthException)
         {
@@ -449,6 +467,24 @@ public static class CliApp
         }
 
         return failed ? 1 : 0;
+    }
+
+    /// <summary>
+    /// Reads the CLI version once and compares it with <c>proton.minVersion</c>.
+    /// Auth and spawn failures keep their existing top-level mapping; an
+    /// unsupported or unparsable version returns exit 1 with a clear message.
+    /// </summary>
+    private static int CheckProtonVersion(PdsyncConfig config, TextWriter error)
+    {
+        // ProtonAuthException and other ProtonCliException subclasses propagate
+        // to the existing top-level handlers (exit 3 / exit 1 respectively).
+        var rawVersion = new ProtonCli(config.Proton.Cli).GetVersion();
+        var gate = ProtonVersionGate.Evaluate(config.Proton.Cli, rawVersion, config.Proton.MinVersion);
+        if (gate.Supported)
+            return 0;
+
+        error.WriteLine(gate.Message);
+        return 1;
     }
 
     private static int Status(PdsyncConfig config, CliArguments args, TextWriter output, TextWriter error)

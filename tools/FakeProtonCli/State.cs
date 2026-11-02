@@ -7,6 +7,7 @@ public sealed class FakeState
 {
     public int SchemaVersion { get; set; } = 1;
     public bool Auth { get; set; } = true;
+    public string? Version { get; set; }
     public int NextId { get; set; } = 1;
     public List<FakeNode> Nodes { get; set; } = new();
     public Dictionary<string, int> RuleHits { get; set; } = new();

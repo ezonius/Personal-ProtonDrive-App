@@ -84,6 +84,15 @@ leftovers, §6.2). `plan` accepts the same scan flags so its output matches the
 run it predicts; it rejects `--cleanup-staged` (exit 1) so a normal `plan` is
 never a preview of the opt-in cleanup divergence.
 
+`plan`, `run`, and `doctor` check the detected `proton-drive --version`
+against `proton.minVersion` before doing work. An older CLI fails with a clear
+message and **exit 1** (the config is valid; the CLI is unsupported): `run`
+fails before taking the run lock or touching state, `plan` stays read-only, and
+`doctor` prints the raw version plus a distinct `FAIL proton-drive version`
+check and returns 1. An unparsable CLI version line fails closed the same way.
+Spawn and auth failures keep their existing mapping (auth 3, other CLI failure
+1). Equal or newer versions pass unchanged.
+
 `init` creates a config and a default `.pdignore`. It resolves the config
 location with the same order as loading: `--config` or `PDSYNC_CONFIG` always
 selects the target (even when it does not exist yet); otherwise an existing
@@ -211,6 +220,13 @@ syncs:
 `onLocalDelete`, `onRemoteDelete`, `initialSync`, and `ignoreFile: .pdignore`,
 plus one sync with the chosen local/remote roots. Every other key is left out so
 it inherits the same defaults as a hand-written config.
+
+`proton.minVersion` is the minimum supported `proton-drive` CLI version and
+defaults to `0.9.0` when unset (the version this project is built and
+live-tested against). It is config-overridable, including raising it. A
+configured value that is not a dotted `major.minor.patch` version (an optional
+leading `v`, pre-release, and build metadata are accepted) is a config error
+(exit 4) naming `proton.minVersion`.
 
 Rules:
 
@@ -993,7 +1009,7 @@ Non-negotiable, enforced before any destructive action:
 | NFR-6 | A killed process (Ctrl-C, power loss) leaves the DB consistent and the next run safe. |
 | NFR-7 | Secrets never appear in config or logs; auth remains entirely inside the CLI. |
 | NFR-8 | Exit codes and `--json` are stable contract; human output may change. |
-| NFR-9 | CLI version is checked at startup; unsupported versions fail with a clear message. |
+| NFR-9 | CLI version is checked at startup by `plan`, `run`, and `doctor` against `proton.minVersion` (default `0.9.0`). An older or unparsable CLI fails with a clear message and exit 1; `run` fails before taking the lock or writing state, and `plan` stays read-only. |
 | NFR-10 | Runs emit a machine-readable action log (JSONL, §7.1) under `logDir` and a human summary with counts and durations; `plan` emits no JSONL log and no run summary. |
 | NFR-11 | Case is never synced: a local case-only rename produces no remote action, and no run creates a second remote entry differing only by case. |
 | NFR-14 | Case-fold collisions abort the affected sync before any write; both colliding paths appear in the report. |
@@ -1200,6 +1216,12 @@ v1 ships at M4; M5 is the "leave it running" bar.
 | `init` config inside the sync root | Append the generated config's relative POSIX path to the `.pdignore` produced by `init` when the config lies under the local root. | §3.1/§3.3, #28, implementation #30 |
 | Local trash purge semantics | `trash purge --older-than <days>` deletes whole run directories only; interactive yes unless `--yes`; `--dry-run` is non-destructive; any sync-lock file means skip (`active-run-lock`); reparse points and paths outside the trash root are refused. `trash list` is filesystem-only/read-only and emits a top-level JSON array. | §3.1, §7, D11, #13 |
 
+### 2026-11-02
+
+| Question | Decision | Where it landed |
+|---|---|---|
+| `proton.minVersion` enforcement | An unsupported CLI version **fails**, it does not warn. `plan`, `run`, and `doctor` parse the `--version` line and exit **1** when it is older than `proton.minVersion`; `doctor` also prints a failing check. The default floor is `0.9.0`, config-overridable (including raising it); a malformed configured value is a config error (exit 4). An unparsable detected version fails closed (exit 1). Auth stays exit 3 and other CLI spawn failures stay exit 1. | §3.1, §3.2, §9 NFR-9, #11 |
+
 Still open (can be decided during M0/M4, not blocking design):
 
 1. Conflict-name format — `(conflict YYYY-MM-DD HHMMSS)` proposed; Proton may
@@ -1215,6 +1237,8 @@ Still open (can be decided during M0/M4, not blocking design):
 From `proton-drive --version` and `--help` on 2026-10-31:
 
 - `Proton Drive CLI cli-drive@0.9.0+75612299`, SDK `js@0.22.2+75612299`
+  - Parsing for `proton.minVersion` searches the first `major.minor.patch` run
+    and ignores the product prefix and `+build` suffix.
 - `filesystem upload [-f STRATEGY] [-d STRATEGY] [-t] localPath... parentPath`
   - file strategies: `create-new-revision`, `rename`, `replace`, `skip`
   - folder strategies: `merge`, `rename`, `replace`, `skip`

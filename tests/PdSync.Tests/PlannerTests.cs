@@ -513,6 +513,27 @@ public sealed class PlannerTests
             skip.Reason == PlanSkipReason.IncompleteLocalScan && skip.PathKey == PathKey.Fold(path));
     }
 
+    [Fact]
+    public void AutomaticCleanup_DefersWhenLocalScanIsIncomplete()
+    {
+        var path = "pdsync-upload-0123456789ab";
+        var remote = RemoteFile(path, "uid-new", "rev-new", "leftover", ShaOf("leftover"));
+
+        var result = Plan(
+            baseEntries: [],
+            local: ScanWith(issues: [new ScanIssue(path, "access denied")]),
+            remote: Remote(remote));
+
+        result.Actions.Should().NotContain(action =>
+            action.Kind == PlanActionKind.CleanupStagedUpload && action.PathKey == PathKey.Fold(path));
+        result.Actions.Should().NotContain(action =>
+            action.PathKey == PathKey.Fold(path) &&
+            (action.Kind == PlanActionKind.DownloadCreate ||
+             action.Kind == PlanActionKind.DownloadReplace));
+        result.Skipped.Should().ContainSingle(skip =>
+            skip.Reason == PlanSkipReason.IncompleteLocalScan && skip.PathKey == PathKey.Fold(path));
+    }
+
     private static PlanResult Plan(
         IReadOnlyList<EntryRecord> baseEntries,
         LocalScan local,
